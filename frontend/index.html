@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediScan Guardian | Chest X-ray Screening</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div class="brand-mark">✚</div><div><b>MediScan Guardian</b><small>AI-assisted chest X-ray screening</small></div><span class="status" id="apiStatus">Checking API…</span></header>
+<main>
+  <section class="hero">
+    <p class="eyebrow">RESPONSIBLE AI FOR EARLIER INSIGHT</p>
+    <h1>A clearer first look<br><em>at chest X-rays.</em></h1>
+    <p class="intro">Upload a chest X-ray to run the trained research model and review its screening signals.</p>
+  </section>
+  <section class="panel">
+    <h2>Upload X-ray image</h2><p class="muted">Use a JPG, PNG, or WEBP image (maximum 12 MB).</p>
+    <label class="drop" for="fileInput"><span class="upload-icon">↑</span><b id="fileName">Choose an X-ray image</b><small>Click to browse your device</small></label>
+    <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+    <button id="analyzeBtn" disabled>Analyze image <span>→</span></button>
+    <p class="message" id="message">Select an image to begin.</p>
+    <div id="results" hidden></div>
+  </section>
+  <section class="notice"><b>Important medical notice</b><p>This tool is a research prototype for educational screening support. It is not a medical device and does not diagnose disease. Do not use its output to make treatment decisions. Consult a qualified radiologist or clinician.</p></section>
+</main>
+<footer>MediScan Guardian · Hackathon research prototype</footer>
+<script src="/app.js"></script>
+</body></html>
