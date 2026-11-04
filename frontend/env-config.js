@@ -4,4 +4,4 @@
 //
 // For local development this file sets API_BASE to empty string so
 // requests go to the same origin (FastAPI serves the frontend locally).
-window.MEDISCAN_API_BASE = '__MEDISCAN_API_BASE__';
+window.MEDISCAN_API_BASE = '';

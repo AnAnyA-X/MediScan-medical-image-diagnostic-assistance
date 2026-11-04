@@ -24,7 +24,19 @@ DEFAULT_THRESHOLD = float(os.environ.get("MEDISCAN_THRESHOLD", "0.50"))
 # Checkpoint paths (configurable via environment variable)
 ENV_MODEL_PATH = os.environ.get("MEDISCAN_MODEL_PATH")
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "densenet121_active_tb.pth"
+MODEL_PATH = DEFAULT_MODEL_PATH
 LEGACY_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "densenet121_chestxray.pth"
+
+
+def get_active_threshold() -> float:
+    """Return the configured decision threshold, checking MEDISCAN_THRESHOLD dynamically."""
+    env_thresh = os.environ.get("MEDISCAN_THRESHOLD")
+    if env_thresh:
+        try:
+            return float(env_thresh)
+        except ValueError:
+            pass
+    return DEFAULT_THRESHOLD
 
 
 def get_active_model_path() -> Path:
@@ -32,11 +44,11 @@ def get_active_model_path() -> Path:
     env_path = os.environ.get("MEDISCAN_MODEL_PATH")
     if env_path:
         return Path(env_path)
-    if DEFAULT_MODEL_PATH.exists():
-        return DEFAULT_MODEL_PATH
+    if MODEL_PATH.exists():
+        return MODEL_PATH
     if LEGACY_MODEL_PATH.exists():
         return LEGACY_MODEL_PATH
-    return DEFAULT_MODEL_PATH
+    return MODEL_PATH
 
 
 def is_model_available() -> bool:
@@ -65,14 +77,30 @@ def load_trained_model(device: Optional[str] = None) -> Tuple[nn.Module, str]:
 
     if not model_path.exists():
         raise FileNotFoundError(
-            f"Trained model checkpoint not found at {model_path}. "
-            "Run backend/train.py or set MEDISCAN_MODEL_PATH."
+            f"Trained model not found at {model_path}. "
+            "Run python backend/train.py or set MEDISCAN_MODEL_PATH."
         )
 
     model = build_model(pretrained=False)
-    checkpoint = torch.load(model_path, map_location=chosen_device)
+    try:
+        checkpoint = torch.load(model_path, map_location=chosen_device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(model_path, map_location=chosen_device)
 
-    state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+    if isinstance(checkpoint, dict):
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            first_key = next(iter(checkpoint.keys()), "")
+            if first_key.startswith("features") or first_key.startswith("classifier"):
+                state_dict = checkpoint
+            else:
+                raise KeyError(f"Checkpoint at {model_path} does not contain 'model_state_dict'.")
+    else:
+        state_dict = checkpoint
+
     model.load_state_dict(state_dict)
     model.to(chosen_device)
     model.eval()
@@ -84,12 +112,15 @@ def predict_image(
     image_input: Union[Image.Image, Path, str, bytes],
     model: nn.Module,
     device: str,
-    threshold: float = DEFAULT_THRESHOLD
+    threshold: Optional[float] = None
 ) -> Dict[str, any]:
     """
     Executes binary active-TB inference using torch.inference_mode().
     Returns standard Phase 4 response structure.
     """
+    if threshold is None:
+        threshold = get_active_threshold()
+
     tensor = preprocess_cxr(image_input, target_size=DEFAULT_TARGET_SIZE).unsqueeze(0).to(device)
 
     with torch.inference_mode():
@@ -102,7 +133,7 @@ def predict_image(
     # Determine risk category & prediction description
     if prob_active_tb >= 0.70:
         risk_level = "High Risk"
-    elif prob_active_tb >= threshold:
+    elif prob_active_tb >= 0.40:
         risk_level = "Moderate Risk"
     else:
         risk_level = "Low Risk"
@@ -115,8 +146,10 @@ def predict_image(
 
     return {
         "status": "success",
+        "target": TARGET_NAME,
         "prediction": prediction_str,
         "probability": round(prob_active_tb, 4),
+        "probability_active_tb": round(prob_active_tb, 4),
         "probability_control": round(prob_control, 4),
         "predicted_class": "Active_TB" if is_positive else "Negative_Control",
         "risk_level": risk_level,

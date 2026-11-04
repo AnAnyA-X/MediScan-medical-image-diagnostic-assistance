@@ -8,3 +8,8 @@ data/nih/
 .DS_Store
 
 data/ScanTrust_AI_Training_Images/
+
+# Local model audit reports
+/MEDISCAN_MODEL_PERFORMANCE_AUDIT.md
+/MEDISCAN_SHORTCUT_LEARNING_ANALYSIS.md
+/audit_visualizations/

@@ -1,6 +1,9 @@
 // API base URL — set via window.MEDISCAN_API_BASE (injected by env-config.js).
 // Falls back to empty string (same-origin) for local dev.
-const API_BASE = (typeof window !== 'undefined' && window.MEDISCAN_API_BASE) || '';
+const rawApiBase = (typeof window !== 'undefined' && window.MEDISCAN_API_BASE) || '';
+const API_BASE = (rawApiBase && !rawApiBase.startsWith('__') && rawApiBase !== 'undefined')
+  ? rawApiBase.replace(/\/+$/, '')
+  : '';
 
 const fileInput = document.getElementById('fileInput');
 const fileName = document.getElementById('fileName');
@@ -12,7 +15,7 @@ const apiStatus = document.getElementById('apiStatus');
 let selectedFile = null;
 
 // --- Health check at startup ---
-fetch(API_BASE + '/api/health')
+(API_BASE ? fetch(API_BASE + '/api/health') : fetch('/api/health'))
   .then((response) => response.json())
   .then((data) => {
     if (data.model_trained) {
@@ -60,10 +63,9 @@ analyzeBtn.addEventListener('click', async () => {
   body.append('file', selectedFile);
 
   try {
-    const response = await fetch(API_BASE + '/api/predict', {
-      method: 'POST',
-      body,
-    });
+    const response = await (API_BASE
+      ? fetch(API_BASE + '/api/predict', { method: 'POST', body })
+      : fetch('/api/predict', { method: 'POST', body }));
 
     let data;
     try {

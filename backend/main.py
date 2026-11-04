@@ -7,12 +7,14 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 
 from backend.model import (
     DEFAULT_THRESHOLD,
     get_active_model_path,
+    get_active_threshold,
     is_model_available,
     load_trained_model,
     predict_image,
@@ -36,6 +38,17 @@ _raw_origins = os.environ.get(
     "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
 )
 ALLOWED_ORIGINS: list = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+
+def is_model_available() -> bool:
+    """Check whether a trained model checkpoint file exists."""
+    p = get_active_model_path()
+    if hasattr(p, "is_file"):
+        try:
+            return p.is_file() and p.stat().st_size > 0
+        except Exception:
+            return bool(p.exists())
+    return bool(p.exists())
 
 
 def reset_cached_model():
@@ -82,6 +95,7 @@ app.add_middleware(
 def health():
     trained = is_model_available()
     active_path = get_active_model_path()
+    active_thresh = get_active_threshold()
 
     return {
         "status": "running",
@@ -90,8 +104,9 @@ def health():
         "target": "Active Pulmonary Tuberculosis",
         "device": str(_cached_device) if _cached_device else "uninitialized",
         "checkpoint_path": str(active_path),
+        "threshold": active_thresh,
         "message": (
-            "DenseNet121 active-TB model is loaded and ready for screening."
+            "Model is ready."
             if trained
             else "API is running, but no trained model checkpoint is installed yet."
         ),
@@ -103,16 +118,18 @@ def health():
 
 
 @app.post("/api/predict")
+@app.post("/api/predict/", include_in_schema=False)
 async def predict(
     file: UploadFile = File(...),
     threshold: Optional[float] = Query(
-        default=DEFAULT_THRESHOLD,
+        default=None,
         ge=0.0,
         le=1.0,
         description="Decision threshold for active TB signal",
     ),
 ):
     global _cached_model, _cached_device
+    active_threshold = threshold if threshold is not None else get_active_threshold()
 
     # 1. Validate MIME type
     allowed_types = {
@@ -133,6 +150,7 @@ async def predict(
         raise HTTPException(
             status_code=503,
             detail=(
+                "The AI model has not been trained yet. "
                 "The AI model checkpoint is not installed. "
                 "Train the model using backend/train.py or install a valid checkpoint."
             ),
@@ -191,11 +209,17 @@ async def predict(
     if _cached_model is None:
         try:
             _cached_model, _cached_device = load_trained_model()
-        except Exception:
-            logger.exception("Model initialization failed")
+        except FileNotFoundError:
+            logger.exception("Model checkpoint not found")
             raise HTTPException(
                 status_code=503,
                 detail="The trained AI model is currently unavailable.",
+            )
+        except Exception:
+            logger.exception("Model initialization failed")
+            raise HTTPException(
+                status_code=500,
+                detail="Inference execution failed due to an internal server error.",
             )
 
     # 6. Run inference
@@ -204,7 +228,7 @@ async def predict(
             image,
             _cached_model,
             _cached_device,
-            threshold=threshold,
+            threshold=active_threshold,
         )
     except Exception:
         logger.exception("Inference execution failed")
@@ -227,8 +251,12 @@ async def predict(
         "notice": "Research screening output only. Not a medical diagnosis.",
     }
 
+# Serve frontend locally
+FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 
-# NOTE: Static file serving is disabled in production (Vercel serves the frontend).
-# Uncomment the two lines below only for local all-in-one development:
-# FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-# app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+async def serve_index():
+    return FileResponse(FRONTEND / "index.html")
+
+app.mount("/", StaticFiles(directory=FRONTEND), name="frontend")
