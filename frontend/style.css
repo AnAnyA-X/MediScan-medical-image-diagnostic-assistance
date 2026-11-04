@@ -18,5 +18,9 @@ button:disabled{opacity:.4;cursor:not-allowed}button span{float:right;font-size:
 .notice{margin-top:20px;border-left:3px solid #d5a44a;background:#fffaf0;padding:16px 18px;border-radius:0 12px 12px 0;font-size:12px;color:#66583e;line-height:1.6}.notice p{margin:5px 0 0}
 #results{margin-top:22px;border-top:1px solid var(--line);padding-top:18px}#results h3{font:700 16px Manrope}
 .result{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #edf1f0;font-size:13px}.result strong{color:var(--teal)}
-footer{text-align:center;color:#91a0a4;font-size:11px;padding:24px}
-@media(max-width:560px){main{margin-top:38px}.panel{padding:20px}header{padding:0 18px}}
+footer{text-align:center;padding:40px;font-size:12px;color:var(--muted)}
+/* Model-pending state block */
+.model-pending{background:#fffbf0;border:1.5px solid #f0c842;border-radius:14px;padding:22px;text-align:center;margin-top:12px}
+.model-pending h3{font:700 17px Manrope;color:#7a5900;margin:0 0 10px}
+.model-pending p{font-size:13px;color:#7a5900;margin:6px 0}
+.model-pending .muted{color:#9e7a20}

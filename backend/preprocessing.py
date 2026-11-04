@@ -134,6 +134,10 @@ def preprocess_cxr(
             img = Image.open(str(image_input)).convert("L")
         pixel_array = np.array(img, dtype=np.float32)
 
+    # Validate image dimensions
+    if pixel_array.size == 0 or len(pixel_array.shape) < 2 or pixel_array.shape[0] == 0 or pixel_array.shape[1] == 0:
+        raise ValueError("Invalid image dimensions: image must have non-zero height and width.")
+
     # 2. Min-Max Dynamic Range Scaling to [0.0, 1.0]
     p_min = float(np.min(pixel_array))
     p_max = float(np.max(pixel_array))
