@@ -25,9 +25,10 @@ analyzeBtn.addEventListener('click',async()=>{
     const response=await fetch('/api/predict',{method:'POST',body});
     const data=await response.json();
     if(!response.ok)throw new Error(data.detail||'Prediction failed.');
-    results.innerHTML='<h3>Model screening signals</h3>'+data.results.slice(0,6).map(x=>
-      `<div class="result"><span>${x.label.replaceAll('_',' ')}</span><strong>${(x.probability*100).toFixed(1)}%</strong></div>`
-    ).join('')+`<p class="muted">${data.notice}</p>`;
+    const signalList = Array.isArray(data.results) ? data.results : (data.results && Array.isArray(data.results.results) ? data.results.results : []);
+    results.innerHTML='<h3>Model screening signals</h3>'+signalList.slice(0,6).map(x=>
+      `<div class="result"><span>${(x.label||'').replaceAll('_',' ')}</span><strong>${((x.probability||0)*100).toFixed(1)}%</strong></div>`
+    ).join('')+`<p class="muted">${data.notice||''}</p>`;
     results.hidden=false;message.textContent='Inference complete.';
   }catch(error){message.textContent=error.message;}
   finally{analyzeBtn.disabled=false;analyzeBtn.innerHTML='Analyze image <span>→</span>';}
