@@ -1,5 +1,6 @@
 import io
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -12,13 +13,20 @@ from backend.model import load_trained_model, predict_image, MODEL_PATH, get_act
 
 logger = logging.getLogger("mediscan.api")
 
+# ---------------------------------------------------------------------------
+# CORS — read allowed origins from environment variable (comma-separated).
+# Falls back to localhost only for local development safety.
+# ---------------------------------------------------------------------------
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173")
+ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 app = FastAPI(title="MediScan Guardian API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your deployed frontend domain before production.
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "Authorization"],
 )
 
 _cached_model = None
@@ -113,5 +121,7 @@ async def predict(file: UploadFile = File(...)):
     }
 
 
-FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+# NOTE: Static file serving is disabled in production (Vercel serves the frontend).
+# Uncomment the two lines below only for local all-in-one development:
+# FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+# app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
