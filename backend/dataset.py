@@ -36,11 +36,21 @@ def resolve_image_path(
     orig_path_str = str(row.get("Original_Image_Path", "")).strip()
     source_dataset = str(row.get("Source_Dataset", "")).strip()
     final_path_str = str(row.get("Final_Image_Path", "")).strip()
+    split_name = str(row.get("split", "")).strip()
 
     candidate_paths: List[Path] = []
 
     if dataset_root is not None:
         root = Path(dataset_root)
+
+        # Candidate 0: By partition split subfolder (e.g. root/Train/CHNCXR_0001_0.png or root/ScanTrust_AI_Training_Images/Train/...)
+        if split_name and image_id:
+            candidate_paths.append(root / split_name / image_id)
+            candidate_paths.append(root / split_name.capitalize() / image_id)
+            candidate_paths.append(root / split_name.lower() / image_id)
+            candidate_paths.append(root / "ScanTrust_AI_Training_Images" / split_name / image_id)
+            candidate_paths.append(root / "ScanTrust_AI_Training_Images" / split_name.capitalize() / image_id)
+            candidate_paths.append(root / "ScanTrust_AI_Training_Images" / split_name.lower() / image_id)
 
         # Candidate 1: Direct join with Original_Image_Path (e.g. root/medical-analysis/datasets/...)
         if orig_path_str:

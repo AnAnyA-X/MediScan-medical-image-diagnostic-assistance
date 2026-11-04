@@ -6,3 +6,5 @@ venv/
 models/*.pth
 data/nih/
 .DS_Store
+
+data/ScanTrust_AI_Training_Images/

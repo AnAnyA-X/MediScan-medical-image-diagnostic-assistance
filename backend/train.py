@@ -1,160 +1,474 @@
 """
-Baseline NIH ChestX-ray14 multi-label training script.
-Expected:
-  data/nih/Data_Entry_2017.csv
-  data/nih/images/   (all extracted image files)
-
-Run from project root:
-  python backend/train.py --data-dir data/nih --csv data/nih/Data_Entry_2017.csv --epochs 3
-
-This is a starter baseline. Use a GPU/Colab for the full dataset.
+MediScan Guardian — Phase 3 Binary Active-TB Training & Evaluation Pipeline
+Backbone: DenseNet121 (ImageNet Pretrained)
+Target: Binary Active Pulmonary Tuberculosis (Class 1) vs Negative Control (Class 0)
+Dataset: Strict Phase 7 Supervised Cohort (540 Train / 116 Val / 117 Held-out Test)
+Evaluation: Pooled Multi-Center + Subgroup Analysis (Shenzhen, Montgomery)
 """
-import argparse, random
+
+import argparse
+import json
+import os
+import random
+import sys
 from pathlib import Path
 
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from PIL import Image, UnidentifiedImageError
 import torch
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision import models, transforms
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 
-LABELS = [
-    "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration",
-    "Mass", "Nodule", "Pneumonia", "Pneumothorax",
-    "Consolidation", "Edema", "Emphysema", "Fibrosis",
-    "Pleural_Thickening", "Hernia"
-]
+from backend.dataset import (
+    ActiveTBCXRDataset,
+    create_tb_dataloaders,
+    load_split_metadata,
+    verify_patient_leakage,
+)
+from backend.model import (
+    CLASS_NAMES,
+    MODEL_PATH,
+    LEGACY_MODEL_PATH,
+    build_model,
+)
+from backend.preprocessing import DEFAULT_TARGET_SIZE
 
-class NIHChestDataset(Dataset):
-    def __init__(self, frame, image_dir, transform):
-        self.frame = frame.reset_index(drop=True)
-        self.image_dir = Path(image_dir)
-        self.transform = transform
 
-    def __len__(self):
-        return len(self.frame)
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-    def __getitem__(self, idx):
-        row = self.frame.iloc[idx]
-        path = self.image_dir / row["Image Index"]
-        image = Image.open(path).convert("RGB")
-        image = self.transform(image)
-        target = torch.tensor(row[LABELS].to_numpy(dtype=np.float32))
-        return image, target
 
-def make_targets(csv_path, image_dir, limit=0):
-    df = pd.read_csv(csv_path)
-    required = {"Image Index", "Finding Labels"}
-    if not required.issubset(df.columns):
-        raise ValueError(f"CSV must contain columns: {required}")
-    # NIH labels are pipe-separated. 'No Finding' is represented by all-zero disease labels.
-    for label in LABELS:
-        df[label] = df["Finding Labels"].fillna("").apply(
-            lambda s: 1.0 if label in str(s).split("|") else 0.0
-        )
-    image_dir = Path(image_dir)
-    df = df[df["Image Index"].apply(lambda name: (image_dir / name).is_file())].copy()
-    if limit and limit > 0:
-        df = df.sample(n=min(limit, len(df)), random_state=42)
-    if df.empty:
-        raise ValueError(f"No images found in {image_dir}. Check the image folder and CSV.")
-    return df
+def compute_binary_metrics(y_true: np.ndarray, y_probs: np.ndarray, threshold: float = 0.5) -> dict:
+    y_pred = (y_probs >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="data/nih")
-    parser.add_argument("--csv", default="data/nih/Data_Entry_2017.csv")
-    parser.add_argument("--image-dir", default=None)
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--limit", type=int, default=0, help="Optional small subset for a quick smoke test")
-    parser.add_argument("--lr", type=float, default=1e-4)
-    args = parser.parse_args()
+    # Sensitivity / Recall
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    # Specificity
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    # Precision
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    # F1
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    # Accuracy
+    acc = accuracy_score(y_true, y_pred)
+    # ROC-AUC
+    try:
+        auc = float(roc_auc_score(y_true, y_probs))
+    except ValueError:
+        auc = None
 
-    data_dir = Path(args.data_dir)
-    image_dir = Path(args.image_dir) if args.image_dir else data_dir / "images"
-    print("Loading NIH annotations and checking image paths...")
-    df = make_targets(args.csv, image_dir, args.limit)
-    print(f"Usable images: {len(df)}")
-    print("Positive examples by label:")
-    print(df[LABELS].sum().sort_values(ascending=False).to_string())
+    return {
+        "accuracy": round(float(acc), 4),
+        "precision": round(float(precision), 4),
+        "sensitivity_recall": round(float(sensitivity), 4),
+        "specificity": round(float(specificity), 4),
+        "f1_score": round(float(f1), 4),
+        "roc_auc": round(float(auc), 4) if auc is not None else None,
+        "confusion_matrix": {
+            "true_negatives": int(tn),
+            "false_positives": int(fp),
+            "false_negatives": int(fn),
+            "true_positives": int(tp),
+        },
+        "sample_count": len(y_true),
+        "positive_count": int(np.sum(y_true == 1)),
+        "negative_count": int(np.sum(y_true == 0)),
+    }
 
-    train_df, val_df = train_test_split(df, test_size=0.15, random_state=42)
-    tfm = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.Grayscale(num_output_channels=3),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    train_ds = NIHChestDataset(train_df, image_dir, tfm)
-    val_ds = NIHChestDataset(val_df, image_dir, tfm)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=0, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Training on: {device}")
-    model = models.densenet121(weights=models.DenseNet121_Weights.DEFAULT)
-    model.classifier = nn.Linear(model.classifier.in_features, len(LABELS))
-    model.to(device)
+def train_epoch(model, dataloader, criterion, optimizer, device):
+    model.train()
+    running_loss = 0.0
+    total_batches = len(dataloader)
+    for batch_idx, (images, targets) in enumerate(dataloader, 1):
+        images = images.to(device)
+        targets = targets.to(device)
 
-    # Calculate per-label positive weights from the training split.
-    positives = train_df[LABELS].sum().to_numpy(dtype=np.float32)
-    negatives = len(train_df) - positives
-    pos_weight = torch.tensor(negatives / np.maximum(positives, 1), dtype=torch.float32).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        optimizer.zero_grad()
+        logits = model(images)
+        loss = criterion(logits, targets)
+        loss.backward()
+        optimizer.step()
 
-    for epoch in range(args.epochs):
-        model.train()
-        running = 0.0
-        for images, targets in train_loader:
-            images, targets = images.to(device), targets.to(device)
-            optimizer.zero_grad()
+        running_loss += loss.item() * images.size(0)
+        if batch_idx % 25 == 0 or batch_idx == total_batches:
+            print(f"  Step [{batch_idx:3d}/{total_batches:3d}] | Batch Loss: {loss.item():.4f}", flush=True)
+    return running_loss / len(dataloader.dataset)
+
+
+def evaluate_split(model, dataloader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    all_probs = []
+    all_targets = []
+    with torch.no_grad():
+        for images, targets in dataloader:
+            images = images.to(device)
+            targets = targets.to(device)
             logits = model(images)
             loss = criterion(logits, targets)
-            loss.backward()
-            optimizer.step()
-            running += loss.item() * images.size(0)
-        print(f"Epoch {epoch+1}/{args.epochs} | train loss: {running/len(train_ds):.4f}")
+            running_loss += loss.item() * images.size(0)
 
-    model.eval()
-    all_probs, all_targets = [], []
-    with torch.no_grad():
-        for images, targets in val_loader:
-            probs = torch.sigmoid(model(images.to(device))).cpu().numpy()
-            all_probs.append(probs)
-            all_targets.append(targets.numpy())
-    probs = np.concatenate(all_probs)
-    targets = np.concatenate(all_targets)
-    aucs = {}
-    for i, label in enumerate(LABELS):
-        try:
-            aucs[label] = float(roc_auc_score(targets[:, i], probs[:, i]))
-        except ValueError:
-            aucs[label] = None
-    valid_aucs = [v for v in aucs.values() if v is not None]
-    print("Validation ROC-AUC by label (actual validation results):")
-    for label, value in aucs.items():
-        print(f"  {label}: {value:.4f}" if value is not None else f"  {label}: unavailable (one class in validation split)")
-    if valid_aucs:
-        print(f"Macro ROC-AUC: {np.mean(valid_aucs):.4f}")
+            probs = torch.sigmoid(logits).cpu().numpy().flatten()
+            all_probs.extend(probs)
+            all_targets.extend(targets.cpu().numpy().flatten())
 
-    output = Path("models")
-    output.mkdir(exist_ok=True)
-    torch.save({
-        "model_state_dict": model.cpu().state_dict(),
-        "labels": LABELS,
-        "validation_roc_auc": aucs,
+    val_loss = running_loss / len(dataloader.dataset)
+    y_true = np.array(all_targets, dtype=int)
+    y_probs = np.array(all_probs, dtype=float)
+    metrics = compute_binary_metrics(y_true, y_probs)
+    return val_loss, y_probs, y_true, metrics
+
+
+def plot_confusion_matrix(cm_dict: dict, output_path: Path, title: str = "Test Confusion Matrix"):
+    tn = cm_dict["true_negatives"]
+    fp = cm_dict["false_positives"]
+    fn = cm_dict["false_negatives"]
+    tp = cm_dict["true_positives"]
+
+    cm = np.array([[tn, fp], [fn, tp]])
+    fig, ax = plt.subplots(figsize=(5, 4.5))
+    cax = ax.matshow(cm, cmap="Blues", alpha=0.85)
+    fig.colorbar(cax)
+
+    for (i, j), z in np.ndenumerate(cm):
+        ax.text(j, i, f"{z}", ha="center", va="center", fontsize=16, fontweight="bold",
+                color="white" if z > (cm.max() / 2) else "black")
+
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
+    ax.set_xticklabels(["Control (0)", "Active TB (1)"])
+    ax.set_yticklabels(["Control (0)", "Active TB (1)"])
+    ax.set_xlabel("Predicted Label", fontweight="bold", labelpad=8)
+    ax.set_ylabel("True Label", fontweight="bold", labelpad=8)
+    ax.set_title(title, fontweight="bold", pad=12)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_roc_curve(y_true: np.ndarray, y_probs: np.ndarray, auc_val: float, output_path: Path):
+    fpr, tpr, _ = roc_curve(y_true, y_probs)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(fpr, tpr, color="#087f82", lw=2.5, label=f"DenseNet121 (AUC = {auc_val:.4f})")
+    ax.plot([0, 1], [0, 1], color="#999999", lw=1.5, linestyle="--", label="Chance (AUC = 0.50)")
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel("False Positive Rate (1 - Specificity)", fontweight="bold")
+    ax.set_ylabel("True Positive Rate (Sensitivity)", fontweight="bold")
+    ax.set_title("ROC Curve — Active Pulmonary TB Screening", fontweight="bold")
+    ax.legend(loc="lower right", frameon=True)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train DenseNet121 for Active TB Detection")
+    parser.add_argument("--metadata-dir", default="data/metadata", help="Path to folder containing metadata CSVs")
+    parser.add_argument("--data-dir", default="data", help="Root directory where images are located")
+    parser.add_argument("--output-dir", default="outputs", help="Directory for output metrics and plots")
+    parser.add_argument("--model-dir", default="models", help="Directory to save model checkpoints")
+    parser.add_argument("--epochs", type=int, default=8, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training and evaluation")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--patience", type=int, default=4, help="Early stopping patience")
+    parser.add_argument("--seed", type=int, default=42, help="Deterministic random seed")
+    parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers")
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+
+    output_dir = PROJECT_ROOT / args.output_dir
+    model_dir = PROJECT_ROOT / args.model_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("  MEDISCAN GUARDIAN — PHASE 3 ACTIVE TB MODEL TRAINING")
+    print("=" * 70)
+
+    # 1. Load DataLoaders and Verify Patient Leakage
+    meta_dir = PROJECT_ROOT / args.metadata_dir
+    data_dir = PROJECT_ROOT / args.data_dir
+    print(f"Loading Phase 7 splits from: {meta_dir}")
+    print(f"Resolving images from root:  {data_dir}")
+
+    train_loader, val_loader, test_loader, stats = create_tb_dataloaders(
+        metadata_dir=meta_dir,
+        dataset_root=data_dir,
+        batch_size=args.batch_size,
+        target_size=DEFAULT_TARGET_SIZE,
+        num_workers=args.num_workers,
+    )
+
+    print(f"\nCohort Overview:")
+    print(f"  - Training Set:   {stats['train_count']} images ({stats['train_pos']} Active TB, {stats['train_neg']} Controls)")
+    print(f"  - Validation Set: {stats['val_count']} images")
+    print(f"  - Held-out Test:  {stats['test_count']} images")
+    print(f"  - Patient Exclusivity: ZERO leakage verified across all partitions ({stats['leakage_verification']['zero_leakage_verified']})")
+
+    # 2. Setup Device, Model, Criterion, Optimizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nTraining Device: {device}")
+    if device.type == "cpu":
+        torch.set_num_threads(min(8, os.cpu_count() or 4))
+        print(f"Using {torch.get_num_threads()} CPU threads for acceleration.")
+
+    print("\nInitializing DenseNet121 with ImageNet pretrained weights...")
+    model = build_model(pretrained=True)
+    model.to(device)
+
+    # Pos weight = Negatives / Positives = 292 / 248 = 1.1774
+    pos_weight_val = float(stats["train_neg"]) / max(float(stats["train_pos"]), 1.0)
+    pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32).to(device)
+    print(f"Class imbalance weighting: pos_weight = {pos_weight_val:.4f}")
+
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=2, verbose=True
+    )
+
+    # Save Configurations
+    training_config = {
+        "model_architecture": "DenseNet121",
+        "pretrained_weights": "ImageNet",
+        "classifier_head": "Linear(in_features=1024, out_features=1)",
+        "input_target_size": list(DEFAULT_TARGET_SIZE),
+        "target_channels": 3,
+        "normalization": {
+            "mean": [0.485, 0.456, 0.406],
+            "std": [0.229, 0.224, 0.225],
+            "scaling": "[0.0, 1.0] min-max",
+            "aspect_ratio": "letterbox padded with black borders"
+        },
+        "target_class": "Active_TB",
+        "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
+        "pos_weight": round(pos_weight_val, 4),
+        "learning_rate": args.lr,
+        "batch_size": args.batch_size,
         "epochs": args.epochs,
-        "training_images": len(train_ds),
-        "validation_images": len(val_ds)
-    }, output / "densenet121_chestxray.pth")
-    print(f"Saved model to {output / 'densenet121_chestxray.pth'}")
+        "seed": args.seed,
+        "patience": args.patience,
+        "device": str(device)
+    }
+
+    with open(output_dir / "config.json", "w") as fp:
+        json.dump(training_config, fp, indent=2)
+
+    with open(output_dir / "class_mapping.json", "w") as fp:
+        json.dump({"0": "Negative_Control", "1": "Active_TB"}, fp, indent=2)
+
+    # 3. Training Loop with Validation Model Selection
+    print("\n--- Starting Training & Validation Loop ---")
+    best_val_auc = -1.0
+    best_epoch = 0
+    best_model_state = None
+    best_val_metrics = None
+    epochs_no_improve = 0
+
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "val_roc_auc": [],
+        "val_accuracy": [],
+        "val_sensitivity": [],
+        "val_specificity": [],
+    }
+
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, _, _, val_metrics = evaluate_split(model, val_loader, criterion, device)
+        val_auc = val_metrics["roc_auc"] if val_metrics["roc_auc"] is not None else 0.0
+
+        history["train_loss"].append(round(train_loss, 4))
+        history["val_loss"].append(round(val_loss, 4))
+        history["val_roc_auc"].append(round(val_auc, 4))
+        history["val_accuracy"].append(val_metrics["accuracy"])
+        history["val_sensitivity"].append(val_metrics["sensitivity_recall"])
+        history["val_specificity"].append(val_metrics["specificity"])
+
+        scheduler.step(val_auc)
+
+        is_best = val_auc > best_val_auc
+        if is_best:
+            best_val_auc = val_auc
+            best_epoch = epoch
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            best_val_metrics = val_metrics
+            epochs_no_improve = 0
+            best_flag = " ★ [Best Checkpoint]"
+        else:
+            epochs_no_improve += 1
+            best_flag = ""
+
+        print(
+            f"Epoch {epoch:2d}/{args.epochs:2d} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_loss:.4f} | "
+            f"Val AUC: {val_auc:.4f} | "
+            f"Val Acc: {val_metrics['accuracy']:.4f} | "
+            f"Val Sens: {val_metrics['sensitivity_recall']:.4f} | "
+            f"Val Spec: {val_metrics['specificity']:.4f}{best_flag}"
+        )
+
+        if epochs_no_improve >= args.patience:
+            print(f"\nEarly stopping triggered after {epoch} epochs (no improvement for {args.patience} epochs).")
+            break
+
+    # Save training history
+    with open(output_dir / "history.json", "w") as fp:
+        json.dump(history, fp, indent=2)
+
+    # 4. Save Best Model Checkpoint
+    checkpoint_path = model_dir / "densenet121_active_tb.pth"
+    legacy_path = model_dir / "densenet121_chestxray.pth"
+
+    checkpoint_data = {
+        "model_state_dict": best_model_state,
+        "model_architecture": "densenet121",
+        "labels": CLASS_NAMES,
+        "target_name": "Active_TB",
+        "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
+        "best_epoch": best_epoch,
+        "best_val_roc_auc": best_val_auc,
+        "best_val_metrics": best_val_metrics,
+        "preprocessing_config": training_config["normalization"],
+    }
+    torch.save(checkpoint_data, checkpoint_path)
+    torch.save(checkpoint_data, legacy_path)
+    print(f"\nSaved best model checkpoint (Epoch {best_epoch}, Val AUC: {best_val_auc:.4f}) to:")
+    print(f"  - {checkpoint_path}")
+    print(f"  - {legacy_path} (API compatibility mirror)")
+
+    # 5. Held-Out Test Evaluation (Evaluated ONLY after model selection)
+    print("\n" + "=" * 70)
+    print("  HELD-OUT TEST SET EVALUATION (Unseen Patients Only)")
+    print("=" * 70)
+
+    # Load best model for evaluation
+    model.load_state_dict(best_model_state)
+    model.to(device).eval()
+
+    # Load test split with metadata passthrough for subgroup evaluations
+    test_df = load_split_metadata(meta_dir / "Test_Metadata.csv", dataset_root=data_dir)
+    test_ds = ActiveTBCXRDataset(test_df, dataset_root=data_dir, target_size=DEFAULT_TARGET_SIZE, return_meta=True)
+    test_meta_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+
+    test_probs = []
+    test_targets = []
+    test_sources = []
+    test_img_ids = []
+
+    with torch.no_grad():
+        for images, targets, meta in test_meta_loader:
+            images = images.to(device)
+            logits = model(images)
+            probs = torch.sigmoid(logits).cpu().numpy().flatten()
+
+            test_probs.extend(probs)
+            test_targets.extend(targets.numpy().flatten())
+            test_sources.extend(meta["source_dataset"])
+            test_img_ids.extend(meta["image_id"])
+
+    y_test_true = np.array(test_targets, dtype=int)
+    y_test_probs = np.array(test_probs, dtype=float)
+    sources = np.array(test_sources)
+
+    # A. Pooled Multi-Center Metrics
+    pooled_metrics = compute_binary_metrics(y_test_true, y_test_probs)
+
+    # B. Shenzhen-Only Metrics
+    shz_mask = (sources == "TB_Shenzhen")
+    shz_metrics = compute_binary_metrics(y_test_true[shz_mask], y_test_probs[shz_mask])
+
+    # C. Montgomery-Only Metrics
+    mc_mask = (sources == "TB_Montgomery")
+    mc_metrics = compute_binary_metrics(y_test_true[mc_mask], y_test_probs[mc_mask])
+
+    # Generate and Save Evaluation Plots
+    plot_confusion_matrix(pooled_metrics["confusion_matrix"], output_dir / "confusion_matrix.png", title="Test Confusion Matrix (Pooled Multi-Center)")
+    plot_roc_curve(y_test_true, y_test_probs, pooled_metrics["roc_auc"], output_dir / "roc_curve.png")
+
+    full_evaluation_report = {
+        "pooled_multicenter_metrics": pooled_metrics,
+        "subgroup_metrics": {
+            "shenzhen_only": shz_metrics,
+            "montgomery_only": mc_metrics,
+            "montgomery_warning": (
+                "Warning: The Montgomery test subgroup contains only 15 test images (3 positive, 12 negative); "
+                "small-sample statistics may exhibit wide confidence intervals."
+            )
+        },
+        "checkpoint_path": str(checkpoint_path),
+        "best_epoch": best_epoch,
+        "best_val_roc_auc": best_val_auc,
+    }
+
+    with open(output_dir / "test_metrics.json", "w") as fp:
+        json.dump(full_evaluation_report, fp, indent=2)
+
+    # Print Final Audit Summary
+    print(f"\n[A] POOLED MULTI-CENTER TEST METRICS (N = {pooled_metrics['sample_count']}):")
+    print(f"  • Accuracy:         {pooled_metrics['accuracy'] * 100:.2f}%")
+    print(f"  • Precision:        {pooled_metrics['precision'] * 100:.2f}%")
+    print(f"  • Sensitivity/Recall: {pooled_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  • Specificity:      {pooled_metrics['specificity'] * 100:.2f}%")
+    print(f"  • F1-Score:         {pooled_metrics['f1_score']:.4f}")
+    print(f"  • ROC-AUC:          {pooled_metrics['roc_auc']:.4f}")
+    print(f"  • Confusion Matrix: TP={pooled_metrics['confusion_matrix']['true_positives']}, FP={pooled_metrics['confusion_matrix']['false_positives']}, TN={pooled_metrics['confusion_matrix']['true_negatives']}, FN={pooled_metrics['confusion_matrix']['false_negatives']}")
+
+    print(f"\n[B] SHENZHEN-ONLY SUBGROUP METRICS (N = {shz_metrics['sample_count']}):")
+    print(f"  • Accuracy:         {shz_metrics['accuracy'] * 100:.2f}%")
+    print(f"  • Precision:        {shz_metrics['precision'] * 100:.2f}%")
+    print(f"  • Sensitivity:      {shz_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  • Specificity:      {shz_metrics['specificity'] * 100:.2f}%")
+    print(f"  • F1-Score:         {shz_metrics['f1_score']:.4f}")
+    print(f"  • ROC-AUC:          {shz_metrics['roc_auc']:.4f}")
+
+    print(f"\n[C] MONTGOMERY-ONLY SUBGROUP METRICS (N = {mc_metrics['sample_count']}):")
+    print(f"  ! WARNING: Subgroup has only {mc_metrics['sample_count']} images (3 Positives, 12 Negatives); metrics subject to small-sample variance.")
+    print(f"  • Accuracy:         {mc_metrics['accuracy'] * 100:.2f}%")
+    print(f"  • Sensitivity:      {mc_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  • Specificity:      {mc_metrics['specificity'] * 100:.2f}%")
+    print(f"  • ROC-AUC:          {mc_metrics['roc_auc']}")
+
+    print("\n" + "=" * 70)
+    print("  ALL ARTIFACTS SAVED SUCCESSFULLY:")
+    print(f"  • Checkpoint:       {checkpoint_path}")
+    print(f"  • Test Metrics:     {output_dir / 'test_metrics.json'}")
+    print(f"  • Training History: {output_dir / 'history.json'}")
+    print(f"  • Confusion Matrix: {output_dir / 'confusion_matrix.png'}")
+    print(f"  • ROC Curve:        {output_dir / 'roc_curve.png'}")
+    print(f"  • Training Config:  {output_dir / 'config.json'}")
+    print("=" * 70)
+
 
 if __name__ == "__main__":
     main()
