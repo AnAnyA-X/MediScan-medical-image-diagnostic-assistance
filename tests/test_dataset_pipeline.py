@@ -226,3 +226,8 @@ def run_pipeline_validation():
 
 if __name__ == "__main__":
     run_pipeline_validation()
+
+
+def test_dataset_pipeline():
+    """Pytest entrypoint for Phase 2 dataset & preprocessing pipeline validation."""
+    run_pipeline_validation()
