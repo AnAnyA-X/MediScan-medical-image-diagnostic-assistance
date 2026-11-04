@@ -1,127 +1,220 @@
 import io
 import logging
-import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 
-from backend.model import load_trained_model, predict_image, MODEL_PATH, get_active_model_path
+from backend.model import (
+    DEFAULT_THRESHOLD,
+    get_active_model_path,
+    is_model_available,
+    load_trained_model,
+    predict_image,
+)
 
 logger = logging.getLogger("mediscan.api")
-
-# ---------------------------------------------------------------------------
-# CORS — read allowed origins from environment variable (comma-separated).
-# Falls back to localhost only for local development safety.
-# ---------------------------------------------------------------------------
-_raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173")
-ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-
-app = FastAPI(title="MediScan Guardian API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "Authorization"],
-)
 
 _cached_model = None
 _cached_device = None
 
-MAX_UPLOAD_SIZE = 12 * 1024 * 1024  # 12 MB
-UPLOAD_CHUNK_SIZE = 1024 * 1024     # 1 MB chunk
+MAX_UPLOAD_SIZE = 12 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def reset_cached_model():
-    """Helper to reset in-memory cached model instance (used for test isolation)."""
+    """Reset cached model instance for test isolation."""
     global _cached_model, _cached_device
     _cached_model = None
     _cached_device = None
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load model weights at startup if a checkpoint exists."""
+    global _cached_model, _cached_device
+
+    if is_model_available():
+        try:
+            _cached_model, _cached_device = load_trained_model()
+            logger.info("DenseNet121 checkpoint loaded on %s", _cached_device)
+        except Exception as exc:
+            logger.warning("Could not load checkpoint at startup: %s", exc)
+    else:
+        logger.info("API started without an active model checkpoint.")
+
+    yield
+
+
+app = FastAPI(
+    title="MediScan Guardian API",
+    version="2.0.0",
+    description="AI-assisted chest X-ray screening research prototype.",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/api/health")
 def health():
+    trained = is_model_available()
     active_path = get_active_model_path()
-    model_exists = active_path.exists()
+
     return {
         "status": "running",
-        "model_trained": model_exists,
-        "message": "Model is ready." if model_exists
-                   else "API is running, but no trained model checkpoint is installed yet."
+        "model_trained": trained,
+        "model": "DenseNet121",
+        "target": "Active Pulmonary Tuberculosis",
+        "device": str(_cached_device) if _cached_device else "uninitialized",
+        "checkpoint_path": str(active_path),
+        "message": (
+            "DenseNet121 active-TB model is loaded and ready for screening."
+            if trained
+            else "API is running, but no trained model checkpoint is installed yet."
+        ),
+        "disclaimer": (
+            "MediScan Guardian is an educational research prototype, "
+            "not a medical device or diagnostic tool. Does not diagnose disease."
+        ),
     }
 
 
 @app.post("/api/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(
+    file: UploadFile = File(...),
+    threshold: Optional[float] = Query(
+        default=DEFAULT_THRESHOLD,
+        ge=0.0,
+        le=1.0,
+        description="Decision threshold for active TB signal",
+    ),
+):
     global _cached_model, _cached_device
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg", "image/webp"):
-        raise HTTPException(status_code=415, detail="Upload a JPG, PNG, or WEBP image.")
 
-    active_path = get_active_model_path()
-    if not active_path.exists():
+    # 1. Validate MIME type
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/jpg",
+        "image/webp",
+    }
+
+    if file.content_type not in allowed_types:
         raise HTTPException(
-            status_code=503,
-            detail="The AI model has not been trained yet. Add the NIH dataset and run the training command in README.md."
+            status_code=415,
+            detail="Upload a JPG, PNG, or WEBP image.",
         )
 
-    # Early size check if file.size is known by the server
-    file_size = getattr(file, "size", None)
-    if file_size is not None and file_size > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail="Image must be smaller than 12 MB.")
+    # 2. Check model availability
+    if not is_model_available():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AI model checkpoint is not installed. "
+                "Train the model using backend/train.py or install a valid checkpoint."
+            ),
+        )
 
-    # Read in chunks (max 1 MB per read) without buffering excessive data in memory
+    # 3. Read file in chunks and enforce the upload limit
+    file_size = getattr(file, "size", None)
+
+    if file_size is not None and file_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Image must be smaller than 12 MB.",
+        )
+
     raw = bytearray()
+
     while True:
         chunk = await file.read(UPLOAD_CHUNK_SIZE)
+
         if not chunk:
             break
+
         raw.extend(chunk)
+
         if len(raw) > MAX_UPLOAD_SIZE:
-            raise HTTPException(status_code=413, detail="Image must be smaller than 12 MB.")
+            raise HTTPException(
+                status_code=413,
+                detail="Image must be smaller than 12 MB.",
+            )
 
-    if len(raw) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file is empty.",
+        )
 
+    # 4. Validate image integrity
     try:
         image = Image.open(io.BytesIO(raw))
         image.verify()
         image = Image.open(io.BytesIO(raw))
-        if image.width <= 0 or image.height <= 0:
-            raise HTTPException(status_code=400, detail="This file is not a valid image.")
-    except (UnidentifiedImageError, OSError):
-        raise HTTPException(status_code=400, detail="This file is not a valid image.")
 
-    try:
-        if _cached_model is None:
-            _cached_model, _cached_device = load_trained_model()
-        prediction = predict_image(image, _cached_model, _cached_device)
-    except FileNotFoundError as exc:
+        if image.width <= 0 or image.height <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="This file is not a valid image.",
+            )
+
+    except (UnidentifiedImageError, OSError):
         raise HTTPException(
-            status_code=503,
-            detail="The trained AI model is currently unavailable. Please try again later."
+            status_code=400,
+            detail="This file is not a valid image.",
         )
-    except Exception as exc:
-        logger.exception("Unexpected inference execution error: %s", exc)
+
+    # 5. Load model if not already cached
+    if _cached_model is None:
+        try:
+            _cached_model, _cached_device = load_trained_model()
+        except Exception:
+            logger.exception("Model initialization failed")
+            raise HTTPException(
+                status_code=503,
+                detail="The trained AI model is currently unavailable.",
+            )
+
+    # 6. Run inference
+    try:
+        prediction = predict_image(
+            image,
+            _cached_model,
+            _cached_device,
+            threshold=threshold,
+        )
+    except Exception:
+        logger.exception("Inference execution failed")
         raise HTTPException(
             status_code=500,
-            detail="Inference execution failed due to an internal server error. Please try again."
+            detail="Inference execution failed due to an internal server error.",
         )
 
-    # Ensure frontend compatibility: results list formatted for array slicing
-    signals = prediction.get("results", []) if isinstance(prediction, dict) else prediction
+    # 7. Preserve Phase 5 frontend response compatibility
+    signals = (
+        prediction.get("results", [])
+        if isinstance(prediction, dict)
+        else prediction
+    )
+
     return {
         "filename": file.filename,
         "results": signals,
         "prediction_details": prediction if isinstance(prediction, dict) else {},
-        "notice": "Research screening output only. Not a medical diagnosis."
+        "notice": "Research screening output only. Not a medical diagnosis.",
     }
 
 
-# NOTE: Static file serving is disabled in production (Vercel serves the frontend).
-# Uncomment the two lines below only for local all-in-one development:
-# FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-# app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
