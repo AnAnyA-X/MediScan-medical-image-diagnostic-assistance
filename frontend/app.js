@@ -1,3 +1,7 @@
+// API base URL — set via window.MEDISCAN_API_BASE (injected by env-config.js).
+// Falls back to empty string (same-origin) for local dev.
+const API_BASE = (typeof window !== 'undefined' && window.MEDISCAN_API_BASE) || '';
+
 const fileInput = document.getElementById('fileInput');
 const fileName = document.getElementById('fileName');
 const analyzeBtn = document.getElementById('analyzeBtn');
@@ -7,8 +11,8 @@ const apiStatus = document.getElementById('apiStatus');
 
 let selectedFile = null;
 
-// Check API health at startup
-fetch('/api/health')
+// --- Health check at startup ---
+fetch(API_BASE + '/api/health')
   .then((response) => response.json())
   .then((data) => {
     if (data.model_trained) {
@@ -27,6 +31,7 @@ fetch('/api/health')
     apiStatus.style.background = '#fdeded';
   });
 
+// --- File selection ---
 fileInput.addEventListener('change', () => {
   selectedFile = fileInput.files[0] || null;
   fileName.textContent = selectedFile
@@ -42,6 +47,7 @@ fileInput.addEventListener('change', () => {
   results.hidden = true;
 });
 
+// --- Analyze ---
 analyzeBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
 
@@ -54,41 +60,50 @@ analyzeBtn.addEventListener('click', async () => {
   body.append('file', selectedFile);
 
   try {
-    const response = await fetch('/api/predict', {
+    const response = await fetch(API_BASE + '/api/predict', {
       method: 'POST',
       body,
     });
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error('Server returned an unexpected response. Please try again.');
+    }
 
     if (!response.ok) {
+      // 503 = model pending — show friendly model-pending block
+      if (response.status === 503) {
+        results.innerHTML = `
+          <div class="model-pending">
+            <h3>⏳ AI Model Pending</h3>
+            <p>${data.detail || 'The trained model checkpoint is not yet available.'}</p>
+            <p class="muted">Inference will be enabled once the verified checkpoint is installed. No predictions are generated without a trained model.</p>
+          </div>`;
+        results.hidden = false;
+        message.textContent = 'Model not yet available — no predictions generated.';
+        return;
+      }
       throw new Error(data.detail || 'Prediction failed.');
     }
 
-    // Support both the Phase 5 response wrapper and Phase 4 prediction output
+    // Support both Phase 5 and Phase 4 response formats
     const predictionData = data.prediction_details || data;
 
-    const probability = Number(predictionData.probability);
+    const probability = Number(predictionData.probability_active_tb ?? predictionData.probability);
 
     if (!Number.isFinite(probability)) {
       throw new Error('The API returned an invalid prediction response.');
     }
 
-    const threshold = Number(
-      predictionData.threshold_used ?? 0.5
-    );
-
-    const isDetected = probability >= threshold;
-
-    const prediction = predictionData.prediction ||
+    const thresholdUsed = Number(predictionData.threshold_used ?? 0.5);
+    const isDetected = probability >= thresholdUsed;
+    const prediction = predictionData.predicted_class ||
+      predictionData.prediction ||
       (isDetected ? 'TB Signal Detected' : 'No TB Signal Detected');
-
-    const riskLevel = predictionData.risk_level ||
-      (isDetected ? 'High Risk' : 'Low Risk');
-
-    const probabilityControl = Number(
-      predictionData.probability_control ?? (1 - probability)
-    );
+    const riskLevel = predictionData.risk_level || (isDetected ? 'High Risk' : 'Low Risk');
+    const probabilityControl = Number(predictionData.probability_control ?? (1 - probability));
 
     const badgeColor = isDetected ? '#b3261e' : '#1e7b4c';
     const badgeBg = isDetected ? '#fdeded' : '#edf7f1';
@@ -97,7 +112,7 @@ analyzeBtn.addEventListener('click', async () => {
       <div style="margin-bottom:14px;padding:12px 14px;border-radius:10px;background:${badgeBg};border:1px solid ${badgeColor}33;display:flex;justify-content:space-between;align-items:center;">
         <div>
           <strong style="color:${badgeColor};font-size:14px;display:block;">
-            ${prediction}
+            ${prediction.replaceAll('_', ' ')}
           </strong>
           <small style="color:#5c6b73;">
             Risk level: ${riskLevel} · Model: ${predictionData.model || 'DenseNet121'}
@@ -129,7 +144,11 @@ analyzeBtn.addEventListener('click', async () => {
     message.textContent = 'Screening inference complete.';
 
   } catch (error) {
-    message.textContent = `Error: ${error.message}`;
+    if (error instanceof TypeError) {
+      message.textContent = 'Network error: could not reach the backend. Please check your connection.';
+    } else {
+      message.textContent = `Error: ${error.message}`;
+    }
     results.hidden = true;
 
   } finally {

@@ -1,5 +1,6 @@
 import io
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,17 @@ _cached_device = None
 
 MAX_UPLOAD_SIZE = 12 * 1024 * 1024
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+# ---------------------------------------------------------------------------
+# CORS — read from environment variable (comma-separated list of origins).
+# Set ALLOWED_ORIGINS in Render dashboard to your Vercel production domain.
+# Falls back to localhost for local development only.
+# ---------------------------------------------------------------------------
+_raw_origins = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+)
+ALLOWED_ORIGINS: list = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 
 def reset_cached_model():
@@ -59,10 +71,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "Authorization"],
 )
 
 
@@ -116,7 +128,7 @@ async def predict(
             detail="Upload a JPG, PNG, or WEBP image.",
         )
 
-    # 2. Check model availability
+    # 2. Check model availability — return 503 (never a fake prediction)
     if not is_model_available():
         raise HTTPException(
             status_code=503,
@@ -216,5 +228,7 @@ async def predict(
     }
 
 
-FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+# NOTE: Static file serving is disabled in production (Vercel serves the frontend).
+# Uncomment the two lines below only for local all-in-one development:
+# FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+# app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
