@@ -5,8 +5,7 @@ AI-assisted chest X-ray screening research prototype. This repository contains:
 - A DenseNet121 multi-label training baseline for NIH ChestX-ray14.
 - An inference endpoint that only activates when a real trained checkpoint exists.
 
-## Important honesty / safety note
-The repository does **not** include a trained model or X-ray dataset. The app will show that the model is pending until you train it. It does not generate fake predictions. This is a hackathon research prototype, not a diagnostic device.
+
 
 ## 1. Open in VS Code
 Extract the ZIP, then open the `mediscan_guardian` folder in VS Code.
