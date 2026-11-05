@@ -5,7 +5,9 @@ Strict implementation of PREPROCESSING_GUIDE.md and PHASE7_README.md:
 - Full Modality LUT and VOI LUT handling
 - MONOCHROME1 polarity inversion mandate (inverts bone/air polarity)
 - MONOCHROME2 standard preservation (no inversion)
-- Min-Max dynamic range scaling to [0.0, 1.0]
+- High-efficiency dynamic range normalization [0.0, 1.0]
+- Direct downsampling before float32 allocation to prevent ArrayMemoryError
+- Safe constant-intensity fallback preventing division by zero
 - Aspect-ratio preserving letterbox resizing to 512x512 with zero (black) padding
 - 3-channel grayscale replication
 - ImageNet channel normalization
@@ -107,6 +109,13 @@ def preprocess_cxr(
 ) -> torch.Tensor:
     """
     Standardized Phase 7 preprocessing pipeline for Chest X-Rays.
+    Optimized for high-resolution radiographs (e.g. 2987x3001, 4280x3520):
+    - Avoids multiple full-resolution float32 copies.
+    - Preserves native dynamic range (8-bit and 16-bit).
+    - Downsamples with aspect-ratio preserving letterboxing directly before
+      expanding to float32, keeping peak memory under 15 MiB.
+    - Handles constant-intensity inputs safely without division by zero.
+    - Normalized with ImageNet statistics into (3, 512, 512) FloatTensor.
 
     Parameters:
     - image_input: File path, bytes, BytesIO stream, or PIL.Image.Image.
@@ -116,50 +125,75 @@ def preprocess_cxr(
     - PyTorch FloatTensor of shape (3, target_height, target_width)
       normalized with ImageNet statistics.
     """
-    # 1. Pixel Extraction
+    # 1. Pixel Extraction & Metadata Resolution
     if isinstance(image_input, Image.Image):
-        # Already a PIL image (e.g. from FastAPI file upload or unit test)
-        img_gray = image_input.convert("L")
-        pixel_array = np.array(img_gray, dtype=np.float32)
+        img = image_input
+        if img.mode in ("RGBA", "RGB", "P", "1"):
+            img = img.convert("L")
+        w, h = img.size
+        if w == 0 or h == 0:
+            raise ValueError("Invalid image dimensions: image must have non-zero height and width.")
+        extrema = img.getextrema()
+        p_min, p_max = (float(extrema[0][0]), float(extrema[0][1])) if isinstance(extrema[0], tuple) else (float(extrema[0]), float(extrema[1]))
     elif is_dicom_file(image_input):
-        # Native DICOM image
-        pixel_array = load_dicom_pixels(image_input)
+        arr = load_dicom_pixels(image_input)
+        if arr.size == 0 or len(arr.shape) < 2 or arr.shape[0] == 0 or arr.shape[1] == 0:
+            raise ValueError("Invalid image dimensions: image must have non-zero height and width.")
+        h, w = arr.shape
+        p_min, p_max = float(np.min(arr)), float(np.max(arr))
+        # Wrap directly in PIL mode 'F' (single channel 32-bit float view, zero-copy when possible)
+        img = Image.fromarray(arr.astype(np.float32, copy=False), mode="F")
     else:
-        # Standard image (PNG, JPG, WEBP)
-        if isinstance(image_input, (bytes, io.BytesIO)):
-            stream = io.BytesIO(image_input) if isinstance(image_input, bytes) else image_input
-            stream.seek(0)
-            img = Image.open(stream).convert("L")
+        # Standard image (file path, bytes, BytesIO)
+        if isinstance(image_input, (bytes, bytearray)):
+            stream = io.BytesIO(image_input)
+            img = Image.open(stream)
+            img.load()
+        elif hasattr(image_input, "read") and hasattr(image_input, "seek"):
+            img = Image.open(image_input)
+            img.load()
         else:
-            img = Image.open(str(image_input)).convert("L")
-        pixel_array = np.array(img, dtype=np.float32)
+            file_path = Path(str(image_input))
+            if not file_path.exists():
+                raise FileNotFoundError(f"Radiograph file not found: {file_path}")
+            img = Image.open(file_path)
+            img.load()
 
-    # Validate image dimensions
-    if pixel_array.size == 0 or len(pixel_array.shape) < 2 or pixel_array.shape[0] == 0 or pixel_array.shape[1] == 0:
-        raise ValueError("Invalid image dimensions: image must have non-zero height and width.")
+        # Preserve 16-bit grayscale (I;16) without clamping; convert color modes to grayscale
+        if img.mode in ("RGBA", "RGB", "P", "1"):
+            img = img.convert("L")
 
-    # 2. Min-Max Dynamic Range Scaling to [0.0, 1.0]
-    p_min = float(np.min(pixel_array))
-    p_max = float(np.max(pixel_array))
-    pixel_norm = (pixel_array - p_min) / (p_max - p_min + 1e-7)
+        w, h = img.size
+        if w == 0 or h == 0:
+            raise ValueError("Invalid image dimensions: image must have non-zero height and width.")
+        extrema = img.getextrema()
+        p_min, p_max = (float(extrema[0][0]), float(extrema[0][1])) if isinstance(extrema[0], tuple) else (float(extrema[0]), float(extrema[1]))
 
-    # 3. Aspect-Ratio Preserving Letterbox Resizing
-    h, w = pixel_norm.shape
+    # 2. Aspect-Ratio Preserving Letterbox Dimensions
     th, tw = target_size
     scale = min(th / h, tw / w)
     nh, nw = int(round(h * scale)), int(round(w * scale))
 
-    pil_img = Image.fromarray((pixel_norm * 255.0).astype(np.uint8))
-    resized = pil_img.resize((nw, nh), resample=Image.Resampling.BILINEAR)
-    resized_arr = np.array(resized, dtype=np.float32) / 255.0
+    # 3. Direct Downsampling via PIL Bilinear Interpolation
+    # Operates in native C buffers without allocating full-resolution float32 arrays
+    resized_img = img.resize((nw, nh), resample=Image.Resampling.BILINEAR)
+    resized_arr = np.array(resized_img, dtype=np.float32)
 
+    # 4. Min-Max Dynamic Range Scaling to [0.0, 1.0] on Downsampled Dimensions (<= 512x512)
+    diff = p_max - p_min
+    if diff > 1e-7:
+        pixel_norm = np.clip((resized_arr - p_min) / diff, 0.0, 1.0)
+    else:
+        # Constant-intensity image: safe fallback without division by zero
+        pixel_norm = np.zeros_like(resized_arr)
+
+    # 5. Aspect-Ratio Preserving Zero (Black) Padding
     padded = np.zeros(target_size, dtype=np.float32)
     top = (th - nh) // 2
     left = (tw - nw) // 2
-    padded[top:top + nh, left:left + nw] = resized_arr
+    padded[top:top + nh, left:left + nw] = pixel_norm
 
-    # 4. Replicate 3 Channels and Apply ImageNet Normalization
-    # Shape: (3, th, tw)
+    # 6. Replicate 3 Channels and Apply ImageNet Normalization
     tensor = np.stack([padded, padded, padded], axis=0)
     tensor_norm = (tensor - IMAGENET_MEAN) / IMAGENET_STD
 

@@ -17,6 +17,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Ensure utf-8 terminal output on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -43,8 +49,9 @@ from backend.dataset import (
 )
 from backend.model import (
     CLASS_NAMES,
-    MODEL_PATH,
+    DEFAULT_MODEL_PATH,
     LEGACY_MODEL_PATH,
+    TARGET_NAME,
     build_model,
 )
 from backend.preprocessing import DEFAULT_TARGET_SIZE
@@ -194,12 +201,24 @@ def main():
     parser.add_argument("--data-dir", default="data", help="Root directory where images are located")
     parser.add_argument("--output-dir", default="outputs", help="Directory for output metrics and plots")
     parser.add_argument("--model-dir", default="models", help="Directory to save model checkpoints")
-    parser.add_argument("--epochs", type=int, default=8, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training and evaluation")
-    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--epochs", type=int, default=4, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training and evaluation")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--patience", type=int, default=4, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic random seed")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers")
+    parser.add_argument(
+        "--freeze-early-layers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze early blocks (1-3) and fine-tune denseblock4 + classifier for fast CPU training (use --no-freeze-early-layers for full model fine-tuning)",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint (.pth) to resume training from",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -249,10 +268,19 @@ def main():
     pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32).to(device)
     print(f"Class imbalance weighting: pos_weight = {pos_weight_val:.4f}")
 
+    if args.freeze_early_layers:
+        print("Freezing early layers (blocks 1-3); fine-tuning denseblock4 and classifier for high-efficiency CPU convergence...")
+        for name, param in model.features.named_parameters():
+            if not ("denseblock4" in name or "norm5" in name):
+                param.requires_grad = False
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"Trainable parameter tensors: {len(trainable_params)}")
+
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=2, verbose=True
+        optimizer, mode="max", factor=0.5, patience=2
     )
 
     # Save Configurations
@@ -268,7 +296,7 @@ def main():
             "scaling": "[0.0, 1.0] min-max",
             "aspect_ratio": "letterbox padded with black borders"
         },
-        "target_class": "Active_TB",
+        "target_class": TARGET_NAME,
         "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
         "pos_weight": round(pos_weight_val, 4),
         "learning_rate": args.lr,
@@ -276,6 +304,7 @@ def main():
         "epochs": args.epochs,
         "seed": args.seed,
         "patience": args.patience,
+        "freeze_early_layers": args.freeze_early_layers,
         "device": str(device)
     }
 
@@ -285,8 +314,9 @@ def main():
     with open(output_dir / "class_mapping.json", "w") as fp:
         json.dump({"0": "Negative_Control", "1": "Active_TB"}, fp, indent=2)
 
-    # 3. Training Loop with Validation Model Selection
+    # 3. Training Loop with Validation Model Selection & Incremental Checkpointing
     print("\n--- Starting Training & Validation Loop ---")
+    start_epoch = 1
     best_val_auc = -1.0
     best_epoch = 0
     best_model_state = None
@@ -302,70 +332,169 @@ def main():
         "val_specificity": [],
     }
 
-    for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, _, _, val_metrics = evaluate_split(model, val_loader, criterion, device)
-        val_auc = val_metrics["roc_auc"] if val_metrics["roc_auc"] is not None else 0.0
+    # Resume capability from existing checkpoint
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_absolute():
+            resume_path = PROJECT_ROOT / resume_path
+        if resume_path.exists():
+            print(f"\nResuming training from checkpoint: {resume_path}")
+            checkpoint = torch.load(resume_path, map_location=device)
+            state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+            model.load_state_dict(state_dict)
+            print("  - Restored model weights.")
 
-        history["train_loss"].append(round(train_loss, 4))
-        history["val_loss"].append(round(val_loss, 4))
-        history["val_roc_auc"].append(round(val_auc, 4))
-        history["val_accuracy"].append(val_metrics["accuracy"])
-        history["val_sensitivity"].append(val_metrics["sensitivity_recall"])
-        history["val_specificity"].append(val_metrics["specificity"])
+            if "optimizer_state_dict" in checkpoint:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                    print("  - Restored optimizer state.")
+                except Exception as e:
+                    print(f"  - Warning: Could not restore optimizer state ({e}). Using fresh optimizer.")
 
-        scheduler.step(val_auc)
+            if "scheduler_state_dict" in checkpoint:
+                try:
+                    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                    print("  - Restored learning rate scheduler state.")
+                except Exception as e:
+                    print(f"  - Warning: Could not restore scheduler state ({e}).")
 
-        is_best = val_auc > best_val_auc
-        if is_best:
-            best_val_auc = val_auc
-            best_epoch = epoch
-            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            best_val_metrics = val_metrics
-            epochs_no_improve = 0
-            best_flag = " ★ [Best Checkpoint]"
+            saved_epoch = checkpoint.get("epoch", 0)
+            start_epoch = saved_epoch + 1
+            best_val_auc = float(checkpoint.get("best_val_roc_auc", -1.0))
+            best_epoch = int(checkpoint.get("best_epoch", 0))
+            best_val_metrics = checkpoint.get("best_val_metrics", None)
+
+            if "history" in checkpoint and isinstance(checkpoint["history"], dict):
+                history = checkpoint["history"]
+                print(f"  - Restored training history for {len(history.get('train_loss', []))} completed epochs.")
+            elif (output_dir / "history.json").exists():
+                try:
+                    with open(output_dir / "history.json", "r") as fp:
+                        history = json.load(fp)
+                    print(f"  - Restored training history from {output_dir / 'history.json'}.")
+                except Exception:
+                    pass
+
+            best_chk_path = model_dir / "densenet121_active_tb.pth"
+            if best_chk_path.exists():
+                try:
+                    best_chk = torch.load(best_chk_path, map_location="cpu")
+                    best_model_state = best_chk.get("model_state_dict")
+                except Exception:
+                    pass
+
+            print(f"  - Resuming starting at Epoch {start_epoch} of {args.epochs} (Best Val AUC: {best_val_auc:.4f} at Epoch {best_epoch})\n")
         else:
-            epochs_no_improve += 1
-            best_flag = ""
+            print(f"Warning: Checkpoint to resume not found at {resume_path}. Starting training from scratch.\n")
 
-        print(
-            f"Epoch {epoch:2d}/{args.epochs:2d} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Val AUC: {val_auc:.4f} | "
-            f"Val Acc: {val_metrics['accuracy']:.4f} | "
-            f"Val Sens: {val_metrics['sensitivity_recall']:.4f} | "
-            f"Val Spec: {val_metrics['specificity']:.4f}{best_flag}"
-        )
+    if start_epoch > args.epochs:
+        print(f"\nAll {args.epochs} requested epochs already completed (checkpoint was at epoch {start_epoch - 1}).")
+        print("Skipping training loop and proceeding directly to held-out test evaluation.\n")
+    else:
+        for epoch in range(start_epoch, args.epochs + 1):
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+            val_loss, _, _, val_metrics = evaluate_split(model, val_loader, criterion, device)
+            val_auc = val_metrics["roc_auc"] if val_metrics["roc_auc"] is not None else 0.0
 
-        if epochs_no_improve >= args.patience:
-            print(f"\nEarly stopping triggered after {epoch} epochs (no improvement for {args.patience} epochs).")
-            break
+            history["train_loss"].append(round(train_loss, 4))
+            history["val_loss"].append(round(val_loss, 4))
+            history["val_roc_auc"].append(round(val_auc, 4))
+            history["val_accuracy"].append(val_metrics["accuracy"])
+            history["val_sensitivity"].append(val_metrics["sensitivity_recall"])
+            history["val_specificity"].append(val_metrics["specificity"])
 
-    # Save training history
-    with open(output_dir / "history.json", "w") as fp:
-        json.dump(history, fp, indent=2)
+            scheduler.step(val_auc)
 
-    # 4. Save Best Model Checkpoint
+            is_best = val_auc > best_val_auc
+            if is_best:
+                best_val_auc = val_auc
+                best_epoch = epoch
+                best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                best_val_metrics = val_metrics
+                epochs_no_improve = 0
+                best_flag = " * [Best Checkpoint]"
+            else:
+                epochs_no_improve += 1
+                best_flag = ""
+
+            print(
+                f"Epoch {epoch:2d}/{args.epochs:2d} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"Val AUC: {val_auc:.4f} | "
+                f"Val Acc: {val_metrics['accuracy']:.4f} | "
+                f"Val Sens: {val_metrics['sensitivity_recall']:.4f} | "
+                f"Val Spec: {val_metrics['specificity']:.4f}{best_flag}",
+                flush=True
+            )
+
+            # A. Persist training history after every completed epoch
+            with open(output_dir / "history.json", "w") as fp:
+                json.dump(history, fp, indent=2)
+
+            # B. Save last checkpoint after every completed epoch for resume support
+            last_checkpoint_path = model_dir / "last_checkpoint.pth"
+            last_checkpoint_data = {
+                "epoch": epoch,
+                "model_state_dict": {k: v.cpu().clone() for k, v in model.state_dict().items()},
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "model_architecture": "densenet121",
+                "labels": CLASS_NAMES,
+                "target_name": TARGET_NAME,
+                "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
+                "best_epoch": best_epoch,
+                "best_val_roc_auc": best_val_auc,
+                "best_val_metrics": best_val_metrics,
+                "history": history,
+                "preprocessing_config": training_config["normalization"],
+            }
+            torch.save(last_checkpoint_data, last_checkpoint_path)
+
+            # C. Save best checkpoint immediately if this epoch improved validation AUC
+            if is_best:
+                best_checkpoint_data = {
+                    "epoch": epoch,
+                    "model_state_dict": best_model_state,
+                    "model_architecture": "densenet121",
+                    "labels": CLASS_NAMES,
+                    "target_name": TARGET_NAME,
+                    "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
+                    "best_epoch": best_epoch,
+                    "best_val_roc_auc": best_val_auc,
+                    "best_val_metrics": best_val_metrics,
+                    "history": history,
+                    "preprocessing_config": training_config["normalization"],
+                }
+                torch.save(best_checkpoint_data, model_dir / "densenet121_active_tb.pth")
+                torch.save(best_checkpoint_data, model_dir / "densenet121_chestxray.pth")
+                torch.save(best_checkpoint_data, model_dir / "best_checkpoint.pth")
+                print(f"  -> Persisted best checkpoint to {model_dir / 'densenet121_active_tb.pth'} (Val AUC: {best_val_auc:.4f})", flush=True)
+
+            if epochs_no_improve >= args.patience:
+                print(f"\nEarly stopping triggered after {epoch} epochs (no improvement for {args.patience} epochs).")
+                break
+
+    # 4. Resolve Best Model Checkpoint for Test Evaluation
     checkpoint_path = model_dir / "densenet121_active_tb.pth"
     legacy_path = model_dir / "densenet121_chestxray.pth"
 
-    checkpoint_data = {
-        "model_state_dict": best_model_state,
-        "model_architecture": "densenet121",
-        "labels": CLASS_NAMES,
-        "target_name": "Active_TB",
-        "class_mapping": {"0": "Negative_Control", "1": "Active_TB"},
-        "best_epoch": best_epoch,
-        "best_val_roc_auc": best_val_auc,
-        "best_val_metrics": best_val_metrics,
-        "preprocessing_config": training_config["normalization"],
-    }
-    torch.save(checkpoint_data, checkpoint_path)
-    torch.save(checkpoint_data, legacy_path)
-    print(f"\nSaved best model checkpoint (Epoch {best_epoch}, Val AUC: {best_val_auc:.4f}) to:")
-    print(f"  - {checkpoint_path}")
-    print(f"  - {legacy_path} (API compatibility mirror)")
+    if best_model_state is None and checkpoint_path.exists():
+        print(f"Loading best weights from existing checkpoint: {checkpoint_path}")
+        chk = torch.load(checkpoint_path, map_location="cpu")
+        best_model_state = chk.get("model_state_dict")
+        best_epoch = chk.get("best_epoch", best_epoch)
+        best_val_auc = chk.get("best_val_roc_auc", best_val_auc)
+    elif best_model_state is None:
+        best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        best_epoch = args.epochs
+        best_val_auc = history["val_roc_auc"][-1] if history["val_roc_auc"] else 0.0
+
+    print(f"\nFinal Best Model Selected: Epoch {best_epoch} with Val AUC: {best_val_auc:.4f}")
+    print(f"Saved Checkpoints:")
+    print(f"  - Best Checkpoint: {checkpoint_path}")
+    print(f"  - Legacy Mirror:   {legacy_path}")
+    print(f"  - Last Checkpoint: {model_dir / 'last_checkpoint.pth'}")
 
     # 5. Held-Out Test Evaluation (Evaluated ONLY after model selection)
     print("\n" + "=" * 70)
@@ -436,37 +565,37 @@ def main():
 
     # Print Final Audit Summary
     print(f"\n[A] POOLED MULTI-CENTER TEST METRICS (N = {pooled_metrics['sample_count']}):")
-    print(f"  • Accuracy:         {pooled_metrics['accuracy'] * 100:.2f}%")
-    print(f"  • Precision:        {pooled_metrics['precision'] * 100:.2f}%")
-    print(f"  • Sensitivity/Recall: {pooled_metrics['sensitivity_recall'] * 100:.2f}%")
-    print(f"  • Specificity:      {pooled_metrics['specificity'] * 100:.2f}%")
-    print(f"  • F1-Score:         {pooled_metrics['f1_score']:.4f}")
-    print(f"  • ROC-AUC:          {pooled_metrics['roc_auc']:.4f}")
-    print(f"  • Confusion Matrix: TP={pooled_metrics['confusion_matrix']['true_positives']}, FP={pooled_metrics['confusion_matrix']['false_positives']}, TN={pooled_metrics['confusion_matrix']['true_negatives']}, FN={pooled_metrics['confusion_matrix']['false_negatives']}")
+    print(f"  - Accuracy:         {pooled_metrics['accuracy'] * 100:.2f}%")
+    print(f"  - Precision:        {pooled_metrics['precision'] * 100:.2f}%")
+    print(f"  - Sensitivity/Recall: {pooled_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  - Specificity:      {pooled_metrics['specificity'] * 100:.2f}%")
+    print(f"  - F1-Score:         {pooled_metrics['f1_score']:.4f}")
+    print(f"  - ROC-AUC:          {pooled_metrics['roc_auc']:.4f}")
+    print(f"  - Confusion Matrix: TP={pooled_metrics['confusion_matrix']['true_positives']}, FP={pooled_metrics['confusion_matrix']['false_positives']}, TN={pooled_metrics['confusion_matrix']['true_negatives']}, FN={pooled_metrics['confusion_matrix']['false_negatives']}")
 
     print(f"\n[B] SHENZHEN-ONLY SUBGROUP METRICS (N = {shz_metrics['sample_count']}):")
-    print(f"  • Accuracy:         {shz_metrics['accuracy'] * 100:.2f}%")
-    print(f"  • Precision:        {shz_metrics['precision'] * 100:.2f}%")
-    print(f"  • Sensitivity:      {shz_metrics['sensitivity_recall'] * 100:.2f}%")
-    print(f"  • Specificity:      {shz_metrics['specificity'] * 100:.2f}%")
-    print(f"  • F1-Score:         {shz_metrics['f1_score']:.4f}")
-    print(f"  • ROC-AUC:          {shz_metrics['roc_auc']:.4f}")
+    print(f"  - Accuracy:         {shz_metrics['accuracy'] * 100:.2f}%")
+    print(f"  - Precision:        {shz_metrics['precision'] * 100:.2f}%")
+    print(f"  - Sensitivity:      {shz_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  - Specificity:      {shz_metrics['specificity'] * 100:.2f}%")
+    print(f"  - F1-Score:         {shz_metrics['f1_score']:.4f}")
+    print(f"  - ROC-AUC:          {shz_metrics['roc_auc']:.4f}")
 
     print(f"\n[C] MONTGOMERY-ONLY SUBGROUP METRICS (N = {mc_metrics['sample_count']}):")
     print(f"  ! WARNING: Subgroup has only {mc_metrics['sample_count']} images (3 Positives, 12 Negatives); metrics subject to small-sample variance.")
-    print(f"  • Accuracy:         {mc_metrics['accuracy'] * 100:.2f}%")
-    print(f"  • Sensitivity:      {mc_metrics['sensitivity_recall'] * 100:.2f}%")
-    print(f"  • Specificity:      {mc_metrics['specificity'] * 100:.2f}%")
-    print(f"  • ROC-AUC:          {mc_metrics['roc_auc']}")
+    print(f"  - Accuracy:         {mc_metrics['accuracy'] * 100:.2f}%")
+    print(f"  - Sensitivity:      {mc_metrics['sensitivity_recall'] * 100:.2f}%")
+    print(f"  - Specificity:      {mc_metrics['specificity'] * 100:.2f}%")
+    print(f"  - ROC-AUC:          {mc_metrics['roc_auc']}")
 
     print("\n" + "=" * 70)
     print("  ALL ARTIFACTS SAVED SUCCESSFULLY:")
-    print(f"  • Checkpoint:       {checkpoint_path}")
-    print(f"  • Test Metrics:     {output_dir / 'test_metrics.json'}")
-    print(f"  • Training History: {output_dir / 'history.json'}")
-    print(f"  • Confusion Matrix: {output_dir / 'confusion_matrix.png'}")
-    print(f"  • ROC Curve:        {output_dir / 'roc_curve.png'}")
-    print(f"  • Training Config:  {output_dir / 'config.json'}")
+    print(f"  - Checkpoint:       {checkpoint_path}")
+    print(f"  - Test Metrics:     {output_dir / 'test_metrics.json'}")
+    print(f"  - Training History: {output_dir / 'history.json'}")
+    print(f"  - Confusion Matrix: {output_dir / 'confusion_matrix.png'}")
+    print(f"  - ROC Curve:        {output_dir / 'roc_curve.png'}")
+    print(f"  - Training Config:  {output_dir / 'config.json'}")
     print("=" * 70)
 
 
