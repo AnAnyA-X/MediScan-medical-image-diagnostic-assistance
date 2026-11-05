@@ -34,6 +34,12 @@ The application combines a modern web interface with a Python-based backend to s
 | Version Control | Git, GitHub |
 | Deployment | Vercel, Render (planned/configured as applicable) |
 
+<img width="892" height="942" alt="image" src="https://github.com/user-attachments/assets/8eba663d-05b5-42ae-ab84-43f9a8308bda" />
+<img width="790" height="856" alt="image" src="https://github.com/user-attachments/assets/4eaff52a-5484-4fac-b576-b5dd4527440e" />
+<img width="871" height="707" alt="image" src="https://github.com/user-attachments/assets/e63ba0dc-8923-4575-9a39-ae7abdc20b88" />
+
+
+
 ## 🏗️ System Architecture
 
 ```text
