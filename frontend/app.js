@@ -465,19 +465,55 @@ analyzeBtn.addEventListener('click', async () => {
         ${data.notice || 'Research screening output only. Educational research prototype, not a medical device or diagnostic tool.'}
       </div>
 
-      <button type="button" class="btn-reset" id="newScanBtn">
-        Screen Another Radiograph
-      </button>
+      <!-- 6. Actions Bar: Download PDF Report & Screen Another -->
+      <div class="results-actions-strip">
+        <button type="button" class="btn-download" id="downloadPdfBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Download PDF Report
+        </button>
+        <button type="button" class="btn-reset" id="newScanBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"></polyline>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+          </svg>
+          Screen Another Radiograph
+        </button>
+      </div>
     `;
 
     results.hidden = false;
     standbyPlaceholder.hidden = true;
     message.textContent = 'Screening inference complete.';
 
+    const downloadPdfBtn = results.querySelector('#downloadPdfBtn');
+    if (downloadPdfBtn) {
+      downloadPdfBtn.addEventListener('click', () => {
+        generatePdfReport({
+          date: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+          filename: data.filename || (selectedFile ? selectedFile.name : 'radiograph.png'),
+          model: modelName,
+          target: 'Active Pulmonary Tuberculosis',
+          prediction: predictionText,
+          threshold: thresholdUsed.toFixed(4),
+          tbScore: tbPct,
+          ctrlScore: ctrlPct,
+          riskLevel: riskLevel,
+        });
+      });
+    }
+
     const newScanBtn = results.querySelector('#newScanBtn');
     if (newScanBtn) {
       newScanBtn.addEventListener('click', () => {
         resetSelection();
+        results.hidden = true;
+        results.innerHTML = '';
+        standbyPlaceholder.hidden = false;
+        message.textContent = 'Select an X-ray image to begin screening.';
       });
     }
 
@@ -509,3 +545,184 @@ analyzeBtn.addEventListener('click', async () => {
     analyzeBtn.innerHTML = '<span>Run AI Screening Inference</span><span class="arrow" aria-hidden="true">→</span>';
   }
 });
+
+// ==========================================================================
+// 4. Clinical Screening PDF Report Generator (Pure Client-Side PDF-1.4)
+// ==========================================================================
+function generatePdfReport(report) {
+  const sanitize = (text) => String(text || '').replace(/[\\()]/g, '');
+  const title = 'MEDISCAN GUARDIAN - CLINICAL SCREENING REPORT';
+  const dateStr = sanitize(report.date || new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC');
+  const fileName = sanitize(report.filename || 'chest_radiograph.png');
+  const modelName = sanitize(report.model || 'DenseNet121');
+  const target = sanitize(report.target || 'Active Pulmonary Tuberculosis');
+  const prediction = sanitize(report.prediction || 'No TB screening signal detected');
+  const threshold = sanitize(report.threshold || '0.5000');
+  const tbScore = sanitize(report.tbScore || '0.0%');
+  const ctrlScore = sanitize(report.ctrlScore || '0.0%');
+  const riskLevel = sanitize(report.riskLevel || 'Low Risk');
+
+  const streamLines = [
+    // Header Bar
+    '0.03 0.09 0.15 rg',
+    '36 700 540 56 re',
+    'f',
+    'BT',
+    '/F2 15 Tf',
+    '1 1 1 rg',
+    '50 726 Td',
+    '(' + title + ') Tj',
+    'ET',
+    'BT',
+    '/F1 9 Tf',
+    '0 0.82 0.71 rg',
+    '50 710 Td',
+    '(AI-Assisted Chest Radiograph Screening Prototype | Automated Analysis Summary) Tj',
+    'ET',
+
+    // Section 1: Audit Information
+    'BT',
+    '/F2 11 Tf',
+    '0.1 0.15 0.2 rg',
+    '50 660 Td',
+    '(1. AUDIT INFORMATION) Tj',
+    'ET',
+    '0.8 0.85 0.9 RG',
+    '1 w',
+    '50 652 m 562 652 l S',
+    'BT',
+    '/F1 10 Tf',
+    '0.2 0.2 0.2 rg',
+    '50 635 Td',
+    '(Generated: ' + dateStr + ') Tj',
+    '0 -15 Td',
+    '(File Name: ' + fileName + ') Tj',
+    '0 -15 Td',
+    '(Model Architecture: ' + modelName + ') Tj',
+    '0 -15 Td',
+    '(Target Pathology: ' + target + ') Tj',
+    '0 -15 Td',
+    '(Decision Cutoff Threshold: tau = ' + threshold + ') Tj',
+    'ET',
+
+    // Outcome Card
+    '0.94 0.97 0.99 rg',
+    '50 490 512 40 re',
+    'f',
+    '0.0 0.5 0.5 RG',
+    '1.5 w',
+    '50 490 512 40 re',
+    'S',
+    'BT',
+    '/F2 12 Tf',
+    '0 0.3 0.35 rg',
+    '65 506 Td',
+    '(AI Screening Outcome: ' + prediction + ') Tj',
+    'ET',
+
+    // Section 2: Model Output Scores
+    'BT',
+    '/F2 11 Tf',
+    '0.1 0.15 0.2 rg',
+    '50 460 Td',
+    '(2. MODEL OUTPUT SIGNAL SCORES) Tj',
+    'ET',
+    '0.8 0.85 0.9 RG',
+    '1 w',
+    '50 452 m 562 452 l S',
+    'BT',
+    '/F1 10 Tf',
+    '0.2 0.2 0.2 rg',
+    '50 435 Td',
+    '(Active Pulmonary TB Score: ' + tbScore + ') Tj',
+    '0 -16 Td',
+    '(Normal / Negative Control Score: ' + ctrlScore + ') Tj',
+    '0 -16 Td',
+    '(Model Score Stratification: ' + riskLevel + ') Tj',
+    '0 -14 Td',
+    '/F3 9 Tf',
+    '0.4 0.4 0.4 rg',
+    '(Note: Score tier reflects internal algorithmic confidence, not clinical patient risk.) Tj',
+    'ET',
+
+    // Section 3: Protocol & Disclaimer
+    '0.98 0.96 0.92 rg',
+    '50 280 512 70 re',
+    'f',
+    '0.8 0.6 0.2 RG',
+    '1 w',
+    '50 280 512 70 re',
+    'S',
+    'BT',
+    '/F2 9 Tf',
+    '0.6 0.3 0.0 rg',
+    '60 334 Td',
+    '(MANDATORY RESEARCH PROTOCOL & ETHICAL DISCLAIMER) Tj',
+    '/F1 8 Tf',
+    '0.2 0.2 0.2 rg',
+    '0 -14 Td',
+    '(MediScan Guardian is an academic research screening prototype, not a medical device.) Tj',
+    '0 -11 Td',
+    '(It does not diagnose disease or prescribe treatment. All outputs must be evaluated by a) Tj',
+    '0 -11 Td',
+    '(qualified clinician and confirmed via microbiological testing (GeneXpert / Sputum smear).) Tj',
+    'ET',
+
+    // Footer
+    'BT',
+    '/F1 8 Tf',
+    '0.5 0.5 0.5 rg',
+    '50 50 Td',
+    '(MediScan Guardian | Responsible AI Chest Radiograph Screening | Phase 4/5 Integration) Tj',
+    'ET',
+  ];
+
+  const content = streamLines.join('\n');
+  const length = content.length;
+
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R >> >> /Contents 7 0 R >>\nendobj\n',
+    '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n',
+    '6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>\nendobj\n',
+    '7 0 obj\n<< /Length ' + length + ' >>\nstream\n' + content + '\nendstream\nendobj\n',
+  ];
+
+  let pdfBody = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';
+  const offsets = [];
+  let currentOffset = pdfBody.length;
+
+  for (let i = 0; i < objects.length; i++) {
+    offsets.push(currentOffset);
+    pdfBody += objects[i];
+    currentOffset += objects[i].length;
+  }
+
+  const xrefOffset = currentOffset;
+  let xref = 'xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \n';
+  for (let i = 0; i < offsets.length; i++) {
+    const offStr = String(offsets[i]).padStart(10, '0');
+    xref += offStr + ' 00000 n \n';
+  }
+
+  const trailer = 'trailer\n<< /Size ' + (objects.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xrefOffset + '\n%%EOF\n';
+  const fullPdf = pdfBody + xref + trailer;
+
+  const bytes = new Uint8Array(fullPdf.length);
+  for (let i = 0; i < fullPdf.length; i++) {
+    bytes[i] = fullPdf.charCodeAt(i) & 0xff;
+  }
+
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  const safeBaseName = (report.filename || 'radiograph').replace(/\.[^/.]+$/, '');
+  a.download = `MediScan_Report_${safeBaseName}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}

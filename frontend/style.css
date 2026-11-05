@@ -810,6 +810,37 @@ body {
   padding-left: 10px;
 }
 
+.results-actions-strip {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.btn-download {
+  flex: 1 1 180px;
+  background: linear-gradient(135deg, var(--teal-primary), var(--teal-dark));
+  color: #070e17;
+  border: none;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 14px var(--teal-glow);
+}
+
+.btn-download:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 210, 180, 0.35);
+}
+
 .btn-reset {
   margin-top: 8px;
   width: 100%;
@@ -822,6 +853,15 @@ body {
   font-size: 13px;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.results-actions-strip .btn-reset {
+  flex: 1 1 160px;
+  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .btn-reset:hover {
