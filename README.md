@@ -1,78 +1,209 @@
-# MediScan Guardian
+# 🩺 MediScan Guardian
 
-AI-assisted chest X-ray screening research prototype. This repository contains:
-- A FastAPI backend and browser-based frontend.
-- A DenseNet121 multi-label training baseline for NIH ChestX-ray14.
-- An inference endpoint that only activates when a real trained checkpoint exists.
+### AI-Assisted Tuberculosis Screening Using Chest X-Ray Images
 
+MediScan Guardian is an AI-assisted medical imaging research prototype designed to analyze chest X-ray images and provide preliminary Tuberculosis (TB) screening results using a DenseNet121 deep learning model.
 
+The application combines a modern web interface with a Python-based backend to simplify image uploading, AI inference and prediction result visualization.
 
-## 1. Open in VS Code
-Extract the ZIP, then open the `mediscan_guardian` folder in VS Code.
+> **Medical Disclaimer:** MediScan Guardian is an educational and research prototype. It is not a certified medical diagnostic system and must not replace professional medical advice, diagnosis or treatment.
 
-## 2. Create Python environment (Windows PowerShell)
+---
+
+## ✨ Key Features
+
+- **Modern Dashboard:** Futuristic, user-friendly medical interface.
+- **Image Upload:** Drag-and-drop and file-picker support.
+- **Image Preview:** Displays uploaded image, filename, dimensions and file size.
+- **Input Validation:** Checks image formats, file size and image readability.
+- **AI-Powered Screening:** Uses a DenseNet121 model for TB prediction.
+- **Prediction Results:** Displays TB probability, Normal probability and risk category using backend responses.
+- **API Integration:** Connects the frontend with a FastAPI prediction endpoint.
+- **Error Handling:** Handles invalid uploads, unsupported formats, oversized files and backend connectivity issues.
+- **Responsive Interface:** Designed for accessible interaction across screen sizes.
+
+## 🛠️ Technology Stack
+
+| Component | Technologies |
+|---|---|
+| Frontend | HTML, CSS, JavaScript |
+| Backend | Python, FastAPI |
+| Deep Learning | PyTorch, DenseNet121 |
+| Image Processing | Pillow, NumPy |
+| API Communication | REST API, Fetch API |
+| Version Control | Git, GitHub |
+| Deployment | Vercel, Render (planned/configured as applicable) |
+
+## 🏗️ System Architecture
+
+```text
+           USER
+             |
+             v
+     MediScan Dashboard
+             |
+             v
+       Image Upload
+             |
+             v
+    Image Validation
+             |
+             v
+      FastAPI Backend
+             |
+             v
+    Image Preprocessing
+             |
+             v
+       DenseNet121
+       TB Screening
+             |
+             v
+     Prediction Response
+             |
+             v
+      Results Dashboard
+```
+
+## 🚀 Getting Started
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/AnAnyA-X/MediScan-medical-image-diagnostic-assistance.git
+```
+
+### 2. Navigate to the Project
+
+```bash
+cd MediScan-medical-image-diagnostic-assistance
+```
+
+### 3. Create a Virtual Environment
+
+Windows PowerShell:
+
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
 ```
-If PowerShell blocks activation, run:
+
+If PowerShell blocks activation:
+
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .venv\Scripts\Activate.ps1
 ```
-Install the PyTorch build suitable for your machine from https://pytorch.org/get-started/locally/ if the default install fails.
 
-## 3. Run the application
+### 4. Install Dependencies
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Install a compatible PyTorch build from [PyTorch Official Installation Guide](https://pytorch.org/get-started/locally/) if required.
+
+### 5. Start the Backend
+
 From the project root:
-```powershell
+
+```bash
 uvicorn backend.main:app --reload
 ```
-Open http://127.0.0.1:8000
 
-API status: http://127.0.0.1:8000/api/health
-API docs: http://127.0.0.1:8000/docs
+Open the application:
 
-## 4. Add NIH ChestX-ray14 data
-Obtain the dataset through its official distribution source and follow its terms. Extract images so the layout is:
+http://127.0.0.1:8000
+
+API Health Check:
+
+http://127.0.0.1:8000/api/health
+
+API Documentation:
+
+http://127.0.0.1:8000/docs
+
+**Note:** A compatible trained model checkpoint must be available for actual inference. The API may report that the model is unavailable if the checkpoint is missing.
+
+---
+
+## 📂 Project Structure
+
 ```text
-data/
-  nih/
-    Data_Entry_2017.csv
-    images/
-      00000001_000.png
-      ...
+mediscan_guardian/
+│
+├── backend/
+│   ├── main.py
+│   ├── model.py
+│   ├── preprocessing.py
+│   └── train.py
+│
+├── frontend/
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+│
+├── models/
+├── tests/
+├── data/
+├── requirements.txt
+├── render.yaml
+└── vercel.json
 ```
-The CSV must contain `Image Index` and `Finding Labels`. The training script parses NIH's pipe-separated labels for the 14 disease classes.
 
-## 5. Train a real baseline
-From the project root:
-```powershell
-python backend/train.py --data-dir data/nih --csv data/nih/Data_Entry_2017.csv --epochs 3
-```
-Optional small subset for a smoke test:
-```powershell
-python backend/train.py --data-dir data/nih --csv data/nih/Data_Entry_2017.csv --limit 500 --epochs 1 --batch-size 8
-```
-A 500-image smoke test is only to verify the pipeline, not to claim meaningful clinical performance. The full NIH dataset is large; use a GPU/Colab for training if your laptop is not equipped for it. First training may download ImageNet pretrained DenseNet121 weights.
+*Refer to the repository for the complete and current project structure.*
 
-The trained checkpoint is saved to:
-`models/densenet121_chestxray.pth`
+## 🔬 Dataset and Model Information
 
-Restart the API after training. `/api/health` should then report `model_trained: true`.
+- **Model Architecture:** DenseNet121.
+- **Framework:** PyTorch.
+- **Task:** AI-assisted chest X-ray TB screening.
+- **Inference:** Uses the existing trained model checkpoint.
 
-## Dataset integration status
-- NIH ChestX-ray14: baseline training pipeline implemented.
-- TB Montgomery / TB Shenzhen: not merged into the NIH model. Their labels and image formats must be audited and mapped in a separate step.
-- BIMCV COVID-19: requires its metadata/label files to be inspected before integration.
-- PadChest: do not use until the actual dataset is available and verified.
+The repository also contains a baseline training pipeline for NIH ChestX-ray14. Its multi-label training baseline should not be confused with the current TB screening inference model.
 
-Do not report accuracy, AUC, or other metrics unless produced by an actual run on a held-out test set. The starter script prints validation ROC-AUC; for a formal result, keep a separate untouched test set and document the split.
+Dataset availability, training configuration and evaluation results must be verified independently before reporting performance metrics.
 
-## Demo checklist
-1. Show the home screen and upload control.
-2. Show `/api/health` explaining whether a trained model is installed.
-3. If trained, upload a held-out X-ray and show actual model output.
-4. Show training script, dataset source/label handling, and actual evaluation output.
-5. Keep the medical disclaimer visible.
+## ⚠️ Current Limitations
+
+- Current image validation checks file format, size and readability. It does not reliably distinguish genuine chest X-rays from ordinary photographs or screenshots.
+- A valid image file is not necessarily a valid chest radiograph.
+- Model predictions are experimental outputs and are not confirmed medical diagnoses.
+- No accuracy, sensitivity, specificity or AUROC claims are made without independently verified evaluation results.
+
+## 🔮 Future Scope
+
+- Dedicated chest X-ray versus non-X-ray classification.
+- Improved model evaluation and validation.
+- Explainable AI using genuine Grad-CAM visualizations.
+- Expanded dataset support.
+- Enhanced screening reports and history.
+- Further improvements to deployment and accessibility.
+
+---
+
+## 🔗 Project Links
+
+| Resource | Link |
+|---|---|
+| GitHub Repository | [MediScan Guardian](https://github.com/AnAnyA-X/MediScan-medical-image-diagnostic-assistance) |
+| Latest Implementation Branch | [feature/futuristic-frontend](https://github.com/AnAnyA-X/MediScan-medical-image-diagnostic-assistance/tree/feature/futuristic-frontend) |
+| Live Demo | To be added after successful deployment |
+| Demo Video | Optional, to be added |
+
+**Important:** The latest implementation is maintained on `feature/futuristic-frontend`. Ensure the evaluator can access this branch. Do not assume the `main` branch contains the latest implementation until changes are merged.
+
+---
+
+## 👩‍💻 Developers
+
+**Ananya Kulal**
+
+**Santhiya Murugesh**
+
+Developed as an academic AI-assisted medical imaging research project.
+
+---
+
+*Building technology to make preliminary medical image screening more accessible through AI.*
