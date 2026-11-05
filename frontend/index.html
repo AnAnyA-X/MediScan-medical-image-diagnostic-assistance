@@ -1,29 +1,199 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MediScan Guardian | Chest X-ray Screening</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediScan Guardian | AI-Assisted Chest X-ray Screening</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
-<header><div class="brand-mark">✚</div><div><b>MediScan Guardian</b><small>AI-assisted chest X-ray screening</small></div><span class="status" id="apiStatus">Checking API…</span></header>
-<main>
+
+<header class="app-header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">✚</div>
+      <div class="brand-text">
+        <span class="brand-title">MediScan Guardian</span>
+        <span class="brand-subtitle">Responsible AI Chest Radiograph Screening</span>
+      </div>
+    </div>
+
+    <div class="telemetry-strip">
+      <div class="telemetry-pill" id="deviceBadge" title="Backend compute device">Device: Detecting…</div>
+      <div class="telemetry-pill" id="thresholdBadge" title="Decision threshold cutoff">Decision Cutoff: τ = --</div>
+      <div class="status-pill status-checking" id="apiStatus">Checking API…</div>
+    </div>
+  </div>
+</header>
+
+<main class="app-main">
+  <!-- Hero Section -->
   <section class="hero">
-    <p class="eyebrow">RESPONSIBLE AI FOR EARLIER INSIGHT</p>
-    <h1>A clearer first look<br><em>at chest X-rays.</em></h1>
-    <p class="intro">Upload a chest X-ray to run the trained research model and review its screening signals.</p>
+    <div class="hero-eyebrow">RESPONSIBLE AI FOR CLINICAL RESEARCH</div>
+    <h1 class="hero-title">A clearer first look<br><em>at chest radiographs.</em></h1>
+    <p class="hero-description">
+      Instant, preliminary binary screening for Active Pulmonary Tuberculosis using DenseNet121.
+      Designed for rapid clinical triage before confirmatory laboratory diagnostics.
+    </p>
+
+    <div class="specs-grid">
+      <div class="spec-card">
+        <span class="spec-label">MODEL BACKBONE</span>
+        <span class="spec-value">DenseNet121</span>
+        <span class="spec-sub">Single Logit Head</span>
+      </div>
+      <div class="spec-card">
+        <span class="spec-label">TARGET SIGNAL</span>
+        <span class="spec-value">Active Pulmonary TB</span>
+        <span class="spec-sub">Binary Classification</span>
+      </div>
+      <div class="spec-card">
+        <span class="spec-label">PREPROCESSING</span>
+        <span class="spec-value">512 × 512 Letterbox</span>
+        <span class="spec-sub">ImageNet Standardized</span>
+      </div>
+      <div class="spec-card">
+        <span class="spec-label">ACCEPTED FORMATS</span>
+        <span class="spec-value">PNG · JPG · WEBP</span>
+        <span class="spec-sub">Max Payload: 12 MB</span>
+      </div>
+    </div>
   </section>
-  <section class="panel">
-    <h2>Upload X-ray image</h2><p class="muted">Use a JPG, PNG, or WEBP image (maximum 12 MB).</p>
-    <label class="drop" for="fileInput"><span class="upload-icon">↑</span><b id="fileName">Choose an X-ray image</b><small>Click to browse your device</small></label>
-    <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-    <button id="analyzeBtn" disabled>Analyze image <span>→</span></button>
-    <p class="message" id="message">Select an image to begin.</p>
-    <div id="results" hidden></div>
+
+  <!-- Interactive Studio Grid -->
+  <section class="studio-grid">
+    <!-- Left Column: Upload Studio -->
+    <div class="panel upload-panel">
+      <div class="panel-header">
+        <div class="panel-badge">STEP 1</div>
+        <h2 class="panel-title">Radiograph Upload Studio</h2>
+        <p class="panel-subtitle">Upload a frontal chest X-ray image for screening analysis.</p>
+      </div>
+
+      <!-- Dropzone (shown when no file is chosen) -->
+      <label class="drop-zone" id="dropZone" for="fileInput">
+        <div class="drop-icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+        </div>
+        <span class="drop-title" id="fileName">Drop chest X-ray here or click to browse</span>
+        <span class="drop-hint">Supports PNG, JPG, or WEBP up to 12 MB</span>
+      </label>
+      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+
+      <!-- Preview Container (shown when file is selected) -->
+      <div class="preview-container" id="previewContainer" hidden>
+        <div class="preview-viewport">
+          <img id="imagePreview" alt="Chest Radiograph Preview" src="" />
+          <div class="scanner-sweep" id="scannerSweep" hidden></div>
+          <div class="reticle corner-tl"></div>
+          <div class="reticle corner-tr"></div>
+          <div class="reticle corner-bl"></div>
+          <div class="reticle corner-br"></div>
+        </div>
+
+        <div class="preview-toolbar">
+          <div class="file-meta" id="fileMeta">Image details loading…</div>
+          <div class="preview-actions">
+            <button type="button" class="btn-secondary" id="replaceBtn" title="Choose a different image">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+              Replace
+            </button>
+            <button type="button" class="btn-secondary" id="clearBtn" title="Remove current image">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+              Clear
+            </button>
+            <button type="button" class="btn-secondary" id="resetBtn" title="Reset image and screening session">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 2v6h6"></path>
+                <path d="M21 12A9 9 0 0 0 6 5.3L3 8"></path>
+                <path d="M21 22v-6h-6"></path>
+                <path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"></path>
+              </svg>
+              Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Primary Action & Status -->
+      <div class="action-block">
+        <button id="analyzeBtn" class="btn-primary" disabled>
+          <span>Run AI Screening Inference</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </button>
+        <div class="status-message" id="message">Select an X-ray image to begin screening.</div>
+      </div>
+    </div>
+
+    <!-- Right Column: Results Console -->
+    <div class="panel results-panel">
+      <div class="panel-header">
+        <div class="panel-badge">STEP 2</div>
+        <h2 class="panel-title">Screening Results & Metrics</h2>
+        <p class="panel-subtitle">DenseNet121 model inference and signal classification.</p>
+      </div>
+
+      <!-- Standby state placeholder -->
+      <div class="standby-placeholder" id="standbyPlaceholder">
+        <div class="standby-icon">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+            <circle cx="12" cy="10" r="3"></circle>
+          </svg>
+        </div>
+        <h3>Awaiting Radiograph Analysis</h3>
+        <p>Upload a chest X-ray on the left and click "Run AI Screening Inference" to generate screening outputs.</p>
+        <div class="standby-checklist">
+          <div><span class="dot"></span> Evaluates Active Pulmonary TB vs. Negative Control</div>
+          <div><span class="dot"></span> Calibrated operating decision threshold (τ)</div>
+          <div><span class="dot"></span> Algorithmic model confidence output</div>
+        </div>
+      </div>
+
+      <!-- Results Display (populated by app.js) -->
+      <div id="results" hidden></div>
+    </div>
   </section>
-  <section class="notice"><b>Important medical notice</b><p>This tool is a research prototype for educational screening support. It is not a medical device and does not diagnose disease. Do not use its output to make treatment decisions. Consult a qualified radiologist or clinician.</p></section>
+
+  <!-- Medical Protocol & Ethical Disclaimer -->
+  <section class="notice">
+    <div class="notice-header">
+      <span class="notice-icon">⚠️</span>
+      <b>Mandatory Clinical Research Protocol Notice</b>
+    </div>
+    <p>
+      MediScan Guardian is an educational research screening prototype, not a certified medical device or diagnostic tool.
+      It does not provide definitive medical diagnoses or clinical treatment plans. All screening outputs must be reviewed
+      by a certified medical officer or radiologist and verified through bacteriological confirmatory tests (such as GeneXpert MTB/RIF or sputum smear microscopy).
+    </p>
+  </section>
 </main>
-<footer>MediScan Guardian · Hackathon research prototype</footer>
+
+<footer class="app-footer">
+  <div class="footer-inner">
+    <span>MediScan Guardian · Academic Hackathon Research Prototype</span>
+    <span class="footer-dot">·</span>
+    <span>Phase 4/5 Verified API Integration</span>
+  </div>
+</footer>
+
 <script src="/env-config.js"></script>
 <script src="/app.js"></script>
-</body></html>
+</body>
+</html>
